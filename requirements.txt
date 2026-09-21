@@ -1,0 +1,5 @@
+ultralytics>=8.3.0
+opencv-python>=4.8.0
+numpy>=1.24
+# optional: real webcam names on Windows
+# pygrabber>=0.2
