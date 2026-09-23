@@ -1,0 +1,15 @@
+{
+  "early_arm_pull": 35,
+  "squat_pattern": 110,
+  "knee_dominant": 1.2,
+  "shallow_hinge": 135,
+  "over_crunch": 60,
+  "bent_arm_catch": 130,
+  "low_catch": 1.1,
+  "short_finish": 0.25,
+  "rushed_recovery": 1.0,
+  "drift_rate": 0.1,
+  "drift_hinge": 10,
+  "drift_arms": 10,
+  "drift_squat": 10
+}
