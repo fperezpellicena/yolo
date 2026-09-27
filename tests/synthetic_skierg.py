@@ -43,18 +43,25 @@ def pose(th, kind):
     kp[KP["nose"]] = head + [22, 6]; kp[KP["left_eye"]] = head + [16, -2]; kp[KP["right_eye"]] = head + [18, -2]
     return kp, sc
 
+LEAD_S = 1.0                             # athlete still at the catch before stroke 1
+
+def period_of(n):
+    """Seconds for stroke n (0-based): fatigue slows the rate, with a surge at 5-6."""
+    return 1.6 if n in (5, 6) else 1.9 + 0.03 * n
+
 def build():
     kinds = ["good"] * 8 + ["arms"] * 6 + ["squat"] * 6
-    frames = []
+    frames = [pose(0.0, "good")] * int(LEAD_S * FPS)
+    starts = []
     for n, kind in enumerate(kinds):
-        period = 1.9 + 0.03 * n          # fatigue: slowing rate
-        nf = int(period * FPS)
+        nf = int(period_of(n) * FPS)
+        starts.append(len(frames) / FPS)
         for i in range(nf):
             frames.append(pose(i / nf, kind))
     frames += [pose(0.0, "good")] * 10  # finish tall
-    return frames, kinds
+    return frames, kinds, starts
 
-FRAMES, KINDS = build()
+FRAMES, KINDS, STROKE_STARTS = build()      # STROKE_STARTS: true video time of each catch
 
 def write_video(path):
     vw = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"mp4v"), FPS, (W, H))

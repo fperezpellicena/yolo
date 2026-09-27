@@ -7,6 +7,7 @@ import sys
 from typing import Optional, Sequence, Tuple
 
 from .stations import STATIONS
+from .telemetry import machine_drift_rules
 
 
 def _point(text: str) -> Tuple[float, float]:
@@ -40,6 +41,13 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     ath.add_argument("--athlete-point", type=_point, default=None,
                      help="follow the person at X,Y (pixels) in the first frame")
 
+    tel = p.add_argument_group("machine data")
+    tel.add_argument("--telemetry", default=None, metavar="CSV",
+                     help="machine data recorded during the clip (Track My Indoor Workout CSV)")
+    tel.add_argument("--telemetry-offset", type=float, default=None, metavar="S",
+                     help="machine seconds at video second 0, if automatic sync fails "
+                          "(e.g. -3 when the video started 3 s before the app)")
+
     model = p.add_argument_group("model")
     model.add_argument("--model", default="yolo11m-pose.pt",
                        help="pose weights; offline favours accuracy (default: yolo11m-pose.pt)")
@@ -64,8 +72,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0
     station = STATIONS[args.station]
     if args.print_thresholds:
-        print(json.dumps({r.id: r.threshold for r in (*station.rules(), *station.drift_rules())},
-                         indent=2))
+        print(json.dumps({r.id: r.threshold for r in (*station.rules(), *station.drift_rules(),
+                                                      *machine_drift_rules())}, indent=2))
         return 0
     if not args.video:
         print("error: a video file is required", file=sys.stderr)
@@ -75,10 +83,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.thresholds:
         with open(args.thresholds) as fh:
             overrides = json.load(fh)
-        known = {r.id for r in (*station.rules(), *station.drift_rules())}
+        known = {r.id for r in (*station.rules(), *station.drift_rules(),
+                                *machine_drift_rules())}
         unknown = set(overrides) - known
         if unknown:
             print(f"warning: unknown threshold ids ignored: {sorted(unknown)}", file=sys.stderr)
+
+    telemetry = None
+    if args.telemetry:
+        from .telemetry import clean, load_telemetry
+        try:
+            telemetry = clean(load_telemetry(args.telemetry))
+        except (OSError, ValueError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        a, b = telemetry.active_span
+        print(f"Machine data: {telemetry.source}, active {b - a:.0f} s.")
 
     from .pipeline import Extraction, analyze, extract
     from .report import write_csv, write_html, write_json
@@ -110,7 +130,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         ex = extract(reader, est.detect, tracker, args.model)
         ex.save(cache)
 
-    res = analyze(ex, station, args.kpt_conf, overrides)
+    res = analyze(ex, station, args.kpt_conf, overrides, telemetry, args.telemetry_offset)
+    if res.machine is not None:
+        al = res.machine.alignment
+        print(f"Sync: {al.method} ({al.confidence})" +
+              (f", video 0 s = machine {al.offset:+.2f} s." if al.ok else "."))
     for w in res.warnings:
         print(f"warning: {w}", file=sys.stderr)
     print(f"{len(res.reps)} {station.rep_word}s, "

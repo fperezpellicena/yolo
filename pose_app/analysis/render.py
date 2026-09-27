@@ -90,6 +90,9 @@ class Annotator:
             phase = res.station.phases[0] if i < c.mid else res.station.phases[1]
             lines.append(f"{res.station.rep_word.title()} {rep.number}/{len(res.reps)}"
                          f"  {rep.metrics.get('rate_spm', np.nan):.0f} spm  {phase}")
+            power, pace = rep.metrics.get("m_power", np.nan), rep.metrics.get("m_pace", np.nan)
+            if np.isfinite(power) and np.isfinite(pace):
+                lines.append(f"{power:.0f} W  {int(pace // 60)}:{pace % 60:04.1f} /500m")
         pad = int(10 * s)
         lh = int(30 * s)
         box_w = max(text_size(l, fs, thickness(fs))[0] for l in lines) + 2 * pad

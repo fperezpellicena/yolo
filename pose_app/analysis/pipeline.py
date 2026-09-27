@@ -12,6 +12,8 @@ from .body import BodySeries, build_body_series
 from .rules import Drift, Fault, apply_overrides, evaluate_drift
 from .signal import Cycle, find_cycles, hysteresis_thresholds
 from .stations import Station
+from .telemetry import (MachineAnalysis, Telemetry, align, analyze_machine, attach,
+                        machine_drift_rules)
 from .tracking import AthleteTracker
 from .video import VideoReader
 
@@ -101,6 +103,7 @@ class AnalysisResult:
     drift: List[Drift]
     thresholds: Dict[str, float]
     warnings: List[str] = field(default_factory=list)
+    machine: Optional[MachineAnalysis] = None       # set when telemetry was given
 
     def rep_at_frame(self) -> np.ndarray:
         """(N,) rep list position for each analysed frame, -1 outside reps."""
@@ -111,10 +114,13 @@ class AnalysisResult:
 
 
 def analyze(ex: Extraction, station: Station, min_score: float = 0.5,
-            overrides: Optional[Dict[str, float]] = None) -> AnalysisResult:
+            overrides: Optional[Dict[str, float]] = None,
+            telemetry: Optional[Telemetry] = None,
+            telemetry_offset: Optional[float] = None) -> AnalysisResult:
+    """`telemetry` must already be cleaned; `telemetry_offset` overrides the sync."""
     overrides = overrides or {}
     rules = apply_overrides(station.rules(), overrides)
-    drift_rules = apply_overrides(station.drift_rules(), overrides)
+    drift_rules = apply_overrides([*station.drift_rules(), *machine_drift_rules()], overrides)
 
     body = build_body_series(ex.t, ex.frame_index, ex.keypoints, ex.scores, min_score, ex.fps)
     driver = body.metrics[station.driver]
@@ -122,17 +128,42 @@ def analyze(ex: Extraction, station: Station, min_score: float = 0.5,
     cycles = find_cycles(driver, body.t, lo, hi, station.min_rep_s, station.max_rep_s) \
         if np.isfinite(lo) else []
 
+    metrics = [station.summarize(body, cycle) for cycle in cycles]
+    alignment = None
+    if telemetry is not None:
+        starts = np.array([m["t_start"] for m in metrics])
+        durations = np.array([m["duration_s"] for m in metrics])
+        from_rest = _starts_from_rest(driver, body.t, cycles)
+        alignment = align(telemetry, starts, durations, from_rest, telemetry_offset)
+        attach(metrics, telemetry, alignment)
+
     reps = []
-    for k, cycle in enumerate(cycles, 1):
-        metrics = station.summarize(body, cycle)
-        faults = [f for f in (r.check(metrics) for r in rules) if f is not None]
-        reps.append(RepResult(k, cycle, metrics, faults))
+    for k, (cycle, m) in enumerate(zip(cycles, metrics), 1):
+        faults = [f for f in (r.check(m) for r in rules) if f is not None]
+        reps.append(RepResult(k, cycle, m, faults))
     drift = evaluate_drift(drift_rules, [r.metrics for r in reps])
 
     thresholds = {r.id: r.threshold for r in (*rules, *drift_rules)}
     result = AnalysisResult(station, body, reps, drift, thresholds)
+    if telemetry is not None:
+        result.machine = analyze_machine(telemetry, alignment, reps, rules)
     result.warnings = _warnings(result)
     return result
+
+
+def _starts_from_rest(driver: np.ndarray, t: np.ndarray, cycles: List[Cycle]) -> bool:
+    """True if the clip opens with the athlete still, then the strokes begin.
+
+    Then the first video stroke is the first stroke of the piece and can anchor
+    the sync; a clip that starts mid-piece shows movement straight away.
+    """
+    if len(cycles) < 3 or t[cycles[0].start] - t[0] > 15.0:
+        return False
+    stroke_span = np.nanmedian([np.nanmax(driver[c.start:c.end + 1]) -
+                                np.nanmin(driver[c.start:c.end + 1]) for c in cycles[:10]])
+    opening = driver[t <= t[0] + 0.8]
+    opening = opening[np.isfinite(opening)]
+    return bool(opening.size >= 5 and np.ptp(opening) < 0.25 * stroke_span)
 
 
 def _warnings(res: AnalysisResult) -> List[str]:
@@ -148,4 +179,9 @@ def _warnings(res: AnalysisResult) -> List[str]:
                  "with the full movement in frame?")
     elif len(res.reps) < 6:
         w.append("Fewer than 6 reps: fatigue trends need a longer clip.")
+    if res.machine is not None:
+        al = res.machine.alignment
+        if not al.ok or al.confidence == "low":
+            w.extend(al.notes[:1])
+        w.extend(res.machine.checks)
     return w
