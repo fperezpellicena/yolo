@@ -25,6 +25,32 @@ Tuning thresholds with a coach (no re-running the model):
     # edit ski.json
     python hyrox_analyze.py clip.mp4 --station skierg --thresholds ski.json --reuse --no-video
 
+### Adding machine data (SkiErg / rower)
+
+Record the piece with Track My Indoor Workout (FTMS) at the same time as the
+video, export the workout as CSV, and pass it in:
+
+    python hyrox_analyze.py clip.mp4 --station skierg --telemetry workout.csv
+
+The report gains a "Machine data" section (power over the piece with the
+faulty strokes marked, 250 m splits showing pace, power, rate and HR next to
+the technique of the strokes in each split, and how output differed on strokes
+with each fault), fatigue checks on power and distance per stroke, `m_*`
+columns in reps.csv, and watts / pace in the annotated video. Telemetry is not
+part of the pose cache, so `--reuse` still re-analyses instantly.
+
+Sync is automatic. It is sharpest when both recordings include the start:
+start filming, stand still for a moment, then start the piece. Without the
+start it matches stroke rate (+/- 1-2 s); if that is inconclusive the machine
+data is summarised but not attached per stroke, and you can set the sync by
+hand with `--telemetry-offset S` (machine seconds at video second 0).
+Machine values are smoothed by the monitor over several strokes, so compare
+them over splits and groups of strokes, not single strokes.
+
+Recording tips: keep the app in the foreground on its own phone (film on a
+second device), set heart-rate gap handling to nulls, and leave power and
+calorie tuning at 100%.
+
 If other people are in shot, the largest person is followed by default; use
 `--athlete center` or `--athlete-point X,Y` to pick someone else. Offline
 defaults favour accuracy (`yolo11m-pose.pt`, `--imgsz 960`); on a CPU-only
@@ -37,7 +63,8 @@ whose peak -> trough -> peak is one rep, implement `summarize()` (one rep ->
 dict of numbers) and `rules()`, then register it in `stations/__init__.py`.
 Body metrics available per frame are in `analysis/body.py`.
 
-Regression test (no model needed): `python tests/test_skierg.py`.
+Regression tests (no model needed): `python tests/test_skierg.py` and
+`python tests/test_telemetry.py`.
 
 Real-time webcam pose estimation (Ultralytics YOLO) with a responsive,
 full-screen-capable view: original feed | pose overlay | joint-angle panel.
@@ -75,6 +102,7 @@ full-screen-capable view: original feed | pose overlay | joint-angle panel.
             render.py           annotated video
             report.py           HTML / CSV / JSON
             stations/           one analyzer per station (skierg.py so far)
+            telemetry/          machine data: readers, cleaning, sync, fusion
         ui/
             display.py          window, full screen, drawable size
             view.py             ViewState + render_view (composes the screen)
