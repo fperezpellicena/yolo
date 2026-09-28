@@ -57,6 +57,46 @@ def test_clean_gap_and_flatline():
     assert abs(tel.strokes_between(0, 520) - 240 * 25.5 / 60) < 3   # 240 s active
 
 
+def _rewrite_columns(path, drop=(), blank=()):
+    """Remove or empty columns of a TMIW CSV, as other app settings/devices would."""
+    lines = open(path).read().splitlines()
+    i = lines.index("RIDE DATA")
+    header = lines[i + 1].split(",")
+    keep = [k for k, h in enumerate(header) if h not in drop]
+    out = lines[:i + 1]
+    for line in lines[i + 1:]:
+        cells = line.split(",")
+        cells = ["" if (header[k] in blank and line is not lines[i + 1]) else cells[k] for k in keep]
+        out.append(",".join(cells))
+    open(path, "w").write("\n".join(out) + "\n")
+
+
+def test_missing_heart_rate_and_distance():
+    for drop, blank in ((("HR",), ()), ((), ("HR",)), (("DISTANCE",), ())):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "t.csv")
+            make_tmiw_csv(path, STROKE_STARTS, PERIODS, KINDS, log_start=STROKE_STARTS[0] - 0.3)
+            _rewrite_columns(path, drop, blank)
+            tel = clean(load_telemetry(path))
+            if "DISTANCE" in drop:
+                assert any("integrated from speed" in n for n in tel.notes), tel.notes
+                assert np.nanmax(tel.distance) > 100 and np.isfinite(tel.hr).any()
+            else:
+                assert not np.isfinite(tel.hr).any()
+                assert any("No heart-rate" in n for n in tel.notes), tel.notes
+            al = align(tel, np.array(STROKE_STARTS), np.array(PERIODS), video_from_rest=True)
+            assert al.ok and abs(al.offset + STROKE_STARTS[0] - 0.3) < 1.0, (drop, blank, al)
+
+
+def test_video_machine_line():
+    from pose_app.analysis.render import _machine_line
+    full = {"m_hr": 142.4, "m_distance": 350.0, "m_power": 112.2, "m_pace": 134.04}
+    assert _machine_line(full) == "HR 142  350 m  112 W  2:14.0 /500m"
+    assert _machine_line({**full, "m_hr": np.nan}) == "350 m  112 W  2:14.0 /500m"
+    assert _machine_line({**full, "m_power": np.nan, "m_pace": np.nan}) == "HR 142  350 m"
+    assert _machine_line({}) == ""
+
+
 def test_sync_recovers_offset():
     starts = np.array(STROKE_STARTS)
     for log_start in (STROKE_STARTS[0] - 0.3, -2.0):          # app started after / before video
@@ -81,6 +121,10 @@ def test_pipeline_with_telemetry():
         assert abs(mc.alignment.offset + (STROKE_STARTS[0] - 0.3)) < 1.0, mc.alignment
         settled = [np.isfinite(r.metrics["m_power"]) for r in res.reps]
         assert not settled[0] and all(settled[3:]), settled   # monitor start-up ignored
+        # heart rate and distance don't wait for the monitor to settle
+        assert all(np.isfinite(r.metrics["m_hr"]) for r in res.reps)
+        dist = [r.metrics["m_distance"] for r in res.reps]
+        assert all(np.isfinite(dist)) and all(np.diff(dist) > 0), dist
         assert not mc.checks, mc.checks                    # rate and stroke count agree
         drift = {x.rule_id: x.triggered for x in res.drift}
         assert drift["drift_power"], drift                 # squat strokes lose power

@@ -78,11 +78,18 @@ def read_tmiw_csv(path: str) -> Telemetry:
     t = (stamp - stamp[0]) / 1000.0
     notes: List[str] = []
     speed, unit = _speed_to_mps(take("SPEED"), distance, t)
-    if unit != "km/h":
+    if not np.isfinite(distance).any():
+        distance = _distance_from_speed(speed, t)
+        notes.append("No distance in the file; distance integrated from speed (km/h assumed)."
+                     if np.isfinite(distance).any() else
+                     "No distance or speed in the file; activity taken from stroke rate/power.")
+    elif unit != "km/h":
         notes.append(f"SPEED column read as {unit} (inferred from the distance channel).")
 
     hr = take("HR")
-    hr[hr <= 0] = np.nan                         # 'zeros' gap handling in the app
+    hr[(hr <= 0) | (hr > 250)] = np.nan          # 'zeros' / 'nulls' gap handling in the app
+    if not np.isfinite(hr).any():
+        notes.append("No heart-rate data in the file (no strap paired, or it never connected).")
     return Telemetry(
         source=f"Track My Indoor Workout CSV ({os.path.basename(path)})",
         t0_ms=float(stamp[0]), t=t, power=take("POWER"), spm=take("RPM"),
@@ -103,3 +110,12 @@ def _speed_to_mps(speed: np.ndarray, distance: np.ndarray, t: np.ndarray):
             unit = min(factors, key=lambda u: abs(np.log(median_raw * factors[u] / true_mps)))
             return speed * factors[unit], unit
     return speed * factors["km/h"], "km/h"
+
+
+def _distance_from_speed(speed: np.ndarray, t: np.ndarray) -> np.ndarray:
+    """Cumulative metres from speed (m/s); NaN if there is no speed either."""
+    if not np.isfinite(speed).any():
+        return np.full(len(t), np.nan)
+    dt = np.minimum(np.diff(t, prepend=t[0]), 2.5)          # never integrate across gaps
+    v = np.nan_to_num(np.concatenate([[0.0], speed[:-1]]))  # held value over the interval
+    return np.cumsum(v * dt)

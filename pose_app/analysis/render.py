@@ -51,6 +51,21 @@ def draw_skeleton(img: np.ndarray, kp: np.ndarray, near: str, metrics_row: dict)
                 cv2.putText(img, text, (x, y), FONT, fs, TEXT, thickness(fs), AA)
 
 
+def _machine_line(m: dict) -> str:
+    """'HR 142  350 m  112 W  2:14.0 /500m', showing only what the machine logged."""
+    hr, dist, power, pace = (m.get(k, np.nan) for k in ("m_hr", "m_distance", "m_power", "m_pace"))
+    parts = []
+    if np.isfinite(hr):
+        parts.append(f"HR {hr:.0f}")
+    if np.isfinite(dist):
+        parts.append(f"{dist:.0f} m")
+    if np.isfinite(power):
+        parts.append(f"{power:.0f} W")
+    if np.isfinite(pace):
+        parts.append(f"{int(pace // 60)}:{pace % 60:04.1f} /500m")
+    return "  ".join(parts)
+
+
 def _wrap(text: str, width: float, fs: float) -> List[str]:
     lines, line = [], ""
     for word in text.split():
@@ -90,9 +105,9 @@ class Annotator:
             phase = res.station.phases[0] if i < c.mid else res.station.phases[1]
             lines.append(f"{res.station.rep_word.title()} {rep.number}/{len(res.reps)}"
                          f"  {rep.metrics.get('rate_spm', np.nan):.0f} spm  {phase}")
-            power, pace = rep.metrics.get("m_power", np.nan), rep.metrics.get("m_pace", np.nan)
-            if np.isfinite(power) and np.isfinite(pace):
-                lines.append(f"{power:.0f} W  {int(pace // 60)}:{pace % 60:04.1f} /500m")
+            machine = _machine_line(rep.metrics)
+            if machine:
+                lines.append(machine)
         pad = int(10 * s)
         lh = int(30 * s)
         box_w = max(text_size(l, fs, thickness(fs))[0] for l in lines) + 2 * pad

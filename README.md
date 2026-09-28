@@ -36,7 +36,8 @@ The report gains a "Machine data" section (power over the piece with the
 faulty strokes marked, 250 m splits showing pace, power, rate and HR next to
 the technique of the strokes in each split, and how output differed on strokes
 with each fault), fatigue checks on power and distance per stroke, `m_*`
-columns in reps.csv, and watts / pace in the annotated video. Telemetry is not
+columns in reps.csv, and heart rate, distance, watts and pace in the annotated
+video (each shown only when the file has it). Telemetry is not
 part of the pose cache, so `--reuse` still re-analyses instantly.
 
 Sync is automatic. It is sharpest when both recordings include the start:

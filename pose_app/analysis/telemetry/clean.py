@@ -58,6 +58,11 @@ def clean(raw: Telemetry) -> Telemetry:
         # an increase only vouches for samples in the same recording segment
         near = np.where(prev_gap <= next_gap, np.maximum(j - 1, 0), np.minimum(j, len(inc) - 1))
         active &= seg == seg[inc[near]]
+    elif not np.isfinite(dist).any():
+        # no distance or speed logged: fall back to the machine reporting strokes/power
+        moving = np.nan_to_num(raw.spm) > 0
+        moving |= np.nan_to_num(raw.power) > 0
+        active = moving & ~_stale(raw.spm, raw.power)
     else:
         notes.append("Distance never increases: no active rowing/skiing found.")
 
@@ -116,3 +121,13 @@ def _runs_equal(v: np.ndarray, seg: np.ndarray):
                 runs.append((a, i))
             a = i
     return runs
+
+
+def _stale(spm: np.ndarray, power: np.ndarray, n: int = 8) -> np.ndarray:
+    """Samples at the end of the log where stroke rate and power stop changing."""
+    both = np.stack([np.nan_to_num(spm), np.nan_to_num(power)], 1)
+    changed = np.flatnonzero(np.any(np.diff(both, axis=0) != 0, axis=1))
+    out = np.zeros(len(spm), bool)
+    if changed.size and len(spm) - changed[-1] > n:
+        out[changed[-1] + 2:] = True
+    return out

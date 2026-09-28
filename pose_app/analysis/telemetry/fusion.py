@@ -36,19 +36,27 @@ def machine_drift_rules() -> List[DriftRule]:
 
 
 def attach(metrics: Sequence[Dict[str, float]], tel: Telemetry, al: Alignment) -> None:
-    """Add m_* keys to every rep (NaN when unsynchronised or machine idle)."""
+    """Add m_* keys to every rep (NaN when unsynchronised, machine idle or not logged).
+
+    Each channel stands on its own: a file without power still gives heart rate
+    and distance. Heart rate and distance are valid from the first stroke;
+    power, rate and speed wait for the monitor's start-up smoothing to settle.
+    """
     first_active = tel.active_span[0]
     for m in metrics:
         vals = dict.fromkeys(MACHINE_KEYS, math.nan)
+        m.update(vals)
+        if not al.ok:
+            continue
         end = m["t_start"] + m["duration_s"] + al.offset             # machine time at stroke end
-        if al.ok and end - first_active >= SETTLE_S:
-            power, spm, speed, hr, dist = (float(tel.at(c, end)[0]) for c in
-                                           ("power", "spm", "speed", "hr", "distance"))
-            vals.update(m_power=power, m_spm=spm, m_speed=speed, m_hr=hr,
+        vals["m_hr"] = float(tel.at("hr", end)[0])
+        vals["m_distance"] = float(tel.at("distance", end)[0])
+        if end - first_active >= SETTLE_S:
+            power, spm, speed = (float(tel.at(c, end)[0]) for c in ("power", "spm", "speed"))
+            vals.update(m_power=power, m_spm=spm, m_speed=speed,
                         m_pace=500.0 / speed if speed > 0 else math.nan,
                         m_dps=speed * m["duration_s"],
-                        m_work_j=power * m["duration_s"],
-                        m_distance=dist if np.isfinite(power) else math.nan)
+                        m_work_j=power * m["duration_s"])
         m.update(vals)
 
 
