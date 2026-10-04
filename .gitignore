@@ -3,3 +3,5 @@
 *.pt
 *.pyc
 .DS_*
+
+.idea/

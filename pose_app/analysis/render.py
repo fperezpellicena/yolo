@@ -166,8 +166,8 @@ def render_video(reader: VideoReader, res: AnalysisResult, path: str,
     info = reader.info
     scale = min(1.0, max_width / info.width)
     size = (int(info.width * scale) // 2 * 2, int(info.height * scale) // 2 * 2)
-    writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"mp4v"), info.fps, size)
-    if not writer.isOpened():
+    writer = _open_writer(path, info.fps, size)
+    if writer is None:
         print(f"Could not write '{path}'.", file=sys.stderr)
         return
     ann = Annotator(res)
@@ -195,3 +195,18 @@ def snapshot(reader: VideoReader, res: AnalysisResult, frame_index: int,
     scale = min(1.0, max_width / img.shape[1])
     return cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA) \
         if scale < 1 else img
+
+
+def _open_writer(path: str, fps: float, size: Tuple[int, int]) -> Optional[cv2.VideoWriter]:
+    """Prefer H.264 ('avc1'), the only MP4 codec browsers play; fall back to
+    MPEG-4 Part 2 ('mp4v'), which plays in desktop players but not in browsers."""
+    for fourcc in ("avc1", "mp4v"):
+        writer = cv2.VideoWriter(path, cv2.VideoWriter.fourcc(*fourcc), fps, size)
+        if writer.isOpened():
+            if fourcc != "avc1":
+                print("  H.264 encoder unavailable; the video will not play in web browsers.",
+                      file=sys.stderr)
+            return writer
+        writer.release()
+    return None
+
