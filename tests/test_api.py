@@ -13,13 +13,33 @@ from pose_app.analysis.api import (AnalysisError, AnalysisOptions, default_thres
 from pose_app.analysis.cli import main
 
 
+def check_summary(s):
+    """summary.json carries everything the web app needs to draw the report."""
+    assert s["schema_version"] == 1
+    assert s["station"]["name"] == "SkiErg" and s["station"]["filming_tips"]
+    rules = {r["id"]: r for r in s["rules"]}
+    assert rules["early_arm_pull"]["threshold"] == 0.2          # the override, not the default
+    assert {"title", "severity", "metric", "op", "cue"} <= set(rules["early_arm_pull"])
+    assert s["charts"] and all(c["label"] for c in s["charts"])
+    assert {e["rule"] for e in s["examples"]} == {f["rule"] for f in s["faults"]}
+    reps = {r["n"]: r for r in s["per_rep"]}
+    for e in s["examples"]:
+        rep = reps[e["rep"]]
+        assert e["rule"] in {f["rule"] for f in rep["faults"]}
+        assert rep["t_start"] <= e["t"] <= rep["t_start"] + rep["duration_s"], (e, rep)
+        assert rep["video_t_start"] <= e["video_t"] <= rep["video_t_end"], e
+        assert abs(e["t"] - e["video_t"]) < 0.05          # constant frame rate clip from 0 s
+    assert all(isinstance(f["value"], float) for r in s["per_rep"] for f in r["faults"])
+
+
 def test_run_analysis_writes_everything():
     with tempfile.TemporaryDirectory() as d:
         video = os.path.join(d, "ski.mp4")
         write_video(video)
         out = os.path.join(d, "out")
         seen = []
-        opts = AnalysisOptions(model="fake", thresholds={"no_such_rule": 1.0})
+        opts = AnalysisOptions(model="fake", thresholds={"no_such_rule": 1.0,
+                                                         "early_arm_pull": 0.2})
         outcome = run_analysis(video, out, opts, FakeEstimator(),
                                lambda stage, done, total: seen.append(stage))
 
@@ -29,11 +49,16 @@ def test_run_analysis_writes_everything():
         assert {"pose", "video"} <= set(seen)
         assert "no_such_rule" in outcome.warnings[0]
         with open(outcome.files["summary"]) as fh:
-            assert json.load(fh)
+            check_summary(json.load(fh))
 
         # Reuse the cached pose pass without any estimator, as the CLI does.
         again = run_analysis(video, out, AnalysisOptions(reuse=True, video=False))
         assert len(again.result.reps) == len(KINDS) and "video" not in again.files
+        bare = run_analysis(video, os.path.join(d, "bare"),
+                            AnalysisOptions(video=False, report=False, csv=False),
+                            FakeEstimator())
+        assert set(bare.files) == {"pose_cache", "summary"}
+        assert sorted(os.listdir(os.path.join(d, "bare"))) == ["pose_cache.npz", "summary.json"]
         assert main([video, "--out", out, "--reuse", "--no-video"]) == 0
 
 

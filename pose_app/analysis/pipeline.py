@@ -55,10 +55,10 @@ class Extraction:
 def extract(reader: VideoReader, detect: Callable[[np.ndarray], List[Person]],
             tracker: AthleteTracker, model_name: str = "",
             on_progress: Optional[Callable[[int, int], None]] = None) -> Extraction:
-    """`on_progress(frame number, frame count)` is called after every frame."""
+    """`on_progress(frames done, frames in clip or 0)` is called after every frame."""
     ts, idxs, kps, scs, boxes = [], [], [], [], []
-    total = reader.info.frame_count
-    for index, t, frame in reader.frames():
+    total = reader.clip_frame_count
+    for n, (index, t, frame) in enumerate(reader.frames(), 1):
         athlete = tracker.select(detect(frame))
         ts.append(t)
         idxs.append(index)
@@ -71,7 +71,7 @@ def extract(reader: VideoReader, detect: Callable[[np.ndarray], List[Person]],
             scs.append(athlete.scores.astype(float))
             boxes.append(athlete.box.astype(float))
         if on_progress:
-            on_progress(index + 1, total)
+            on_progress(n, total)
     if not ts:
         raise EmptyClipError("No frames were read (check the start and end times).")
     info = reader.info
@@ -103,6 +103,7 @@ class AnalysisResult:
     thresholds: Dict[str, float]
     warnings: List[str] = field(default_factory=list)
     machine: Optional[MachineAnalysis] = None       # set when telemetry was given
+    fps: float = 0.0                # source video; also the annotated video's frame rate
 
     def rep_at_frame(self) -> np.ndarray:
         """(N,) rep list position for each analysed frame, -1 outside reps."""
@@ -143,7 +144,7 @@ def analyze(ex: Extraction, station: Station, min_score: float = 0.5,
     drift = evaluate_drift(drift_rules, [r.metrics for r in reps])
 
     thresholds = {r.id: r.threshold for r in (*rules, *drift_rules)}
-    result = AnalysisResult(station, body, reps, drift, thresholds)
+    result = AnalysisResult(station, body, reps, drift, thresholds, fps=ex.fps)
     if telemetry is not None:
         result.machine = analyze_machine(telemetry, alignment, reps, rules)
     result.warnings = _warnings(result)

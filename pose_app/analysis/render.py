@@ -166,7 +166,7 @@ class Annotator:
 def render_video(reader: VideoReader, res: AnalysisResult, path: str,
                  max_width: int = 1280,
                  on_progress: Optional[Callable[[int, int], None]] = None) -> None:
-    """`on_progress(frame number, frame count)` is called after every frame."""
+    """`on_progress(frames done, frames in clip or 0)` is called after every frame."""
     info = reader.info
     scale = min(1.0, max_width / info.width)
     size = (int(info.width * scale) // 2 * 2, int(info.height * scale) // 2 * 2)
@@ -175,13 +175,13 @@ def render_video(reader: VideoReader, res: AnalysisResult, path: str,
         raise RuntimeError(f"Could not write '{path}'.")
     ann = Annotator(res)
     try:
-        for index, _, frame in reader.frames():
+        for n, (index, _, frame) in enumerate(reader.frames(), 1):
             out = ann.draw(frame, index)
             if scale != 1.0:
                 out = cv2.resize(out, size, interpolation=cv2.INTER_AREA)
             writer.write(out)
             if on_progress:
-                on_progress(index + 1, info.frame_count)
+                on_progress(n, reader.clip_frame_count)
     finally:
         writer.release()
 

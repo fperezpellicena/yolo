@@ -6,14 +6,21 @@ import html
 import json
 import math
 from collections import Counter
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 import cv2
 
 from .pipeline import AnalysisResult, RepResult
 from .render import snapshot
+from .rules import Fault
 from .stations import ChartSpec
 from .video import VideoReader
+
+# summary.json format; bump when a consumer (the web app) would need to change.
+SCHEMA_VERSION = 1
+
+MACHINE_CHARTS = (ChartSpec("m_power", "Machine power", "W"),
+                  ChartSpec("m_dps", "Distance per stroke", "m"))
 
 
 def _num(v) -> Optional[float]:
@@ -30,17 +37,56 @@ def write_csv(res: AnalysisResult, path: str) -> None:
                         ";".join(f.rule_id for f in r.faults)])
 
 
+def chart_specs(res: AnalysisResult) -> List[ChartSpec]:
+    """Per-rep metrics worth charting: the station's, plus machine output when synced."""
+    specs = list(res.station.charts)
+    if res.machine is not None and res.machine.alignment.ok:
+        specs += MACHINE_CHARTS
+    return specs
+
+
+def worst_faults(res: AnalysisResult) -> List[Tuple[RepResult, Fault]]:
+    """For each fault type, the rep where it was furthest past its threshold; majors first."""
+    worst: Dict[str, tuple] = {}
+    for r in res.reps:
+        for f in r.faults:
+            margin = abs(f.value - res.thresholds[f.rule_id])
+            if f.rule_id not in worst or margin > worst[f.rule_id][0]:
+                worst[f.rule_id] = (margin, r, f)
+    return [(r, f) for _, r, f in sorted(worst.values(), key=lambda x: x[2].severity != "major")]
+
+
+def _clock(res: AnalysisResult) -> Callable[[int], Dict[str, Optional[float]]]:
+    """Source frame index -> seconds into the source video ("t") and into
+    annotated.mp4 ("video_t"), which holds every analysed frame at `res.fps`."""
+    pos = {int(f): i for i, f in enumerate(res.body.frame_index)}
+
+    def at(frame: int) -> Dict[str, Optional[float]]:
+        i = pos.get(int(frame))
+        if i is None:
+            return {"t": None, "video_t": None}
+        return {"t": _num(res.body.t[i]), "video_t": _num(i / res.fps) if res.fps else None}
+    return at
+
+
+def _fault_dict(f: Fault, clock) -> Dict:
+    return {"rule": f.rule_id, "value": _num(f.value), **clock(f.frame)}
+
+
 def summary_dict(res: AnalysisResult) -> Dict:
     reps, n = res.reps, len(res.reps)
     counts = Counter(f.rule_id for r in reps for f in r.faults)
     rules = {r.id: r for r in res.station.rules()}
+    st, clock = res.station, _clock(res)
 
     def mean(key):
         vals = [r.metrics[key] for r in reps if math.isfinite(r.metrics.get(key, math.nan))]
         return _num(sum(vals) / len(vals)) if vals else None
 
     return {
-        "station": res.station.key,
+        "schema_version": SCHEMA_VERSION,
+        "station": {"key": st.key, "name": st.name, "rep_word": st.rep_word, "view": st.view,
+                    "phases": list(st.phases), "filming_tips": list(st.filming_tips)},
         "reps": n,
         "clean_reps": sum(1 for r in reps if not r.faults),
         "clean_pct": _num(100 * sum(1 for r in reps if not r.faults) / n) if n else None,
@@ -48,6 +94,12 @@ def summary_dict(res: AnalysisResult) -> Dict:
         "faults": [{"rule": rid, "title": rules[rid].title, "severity": rules[rid].severity,
                     "count": c, "pct": _num(100 * c / n), "cue": rules[rid].cue}
                    for rid, c in counts.most_common()],
+        "rules": [{"id": r.id, "title": r.title, "severity": r.severity, "metric": r.metric,
+                   "op": r.op, "threshold": res.thresholds[r.id], "cue": r.cue}
+                  for r in rules.values()],
+        "charts": [{"metric": c.metric, "label": c.label, "unit": c.unit}
+                   for c in chart_specs(res)],
+        "examples": [{"rep": r.number, **_fault_dict(f, clock)} for r, f in worst_faults(res)],
         "drift": [{"rule": d.rule_id, "title": d.title, "metric": d.metric,
                    "early": _num(d.early), "late": _num(d.late), "change": _num(d.change),
                    "triggered": d.triggered, "cue": d.cue} for d in res.drift],
@@ -81,8 +133,14 @@ def _machine_dict(res: AnalysisResult) -> Optional[Dict]:
 
 def write_json(res: AnalysisResult, path: str) -> None:
     data = summary_dict(res)
+    clock = _clock(res)
+
+    def video_t(i: int) -> Optional[float]:
+        return _num(i / res.fps) if res.fps else None
     data["per_rep"] = [{"n": r.number, **{k: _num(v) for k, v in r.metrics.items()},
-                        "faults": [f.rule_id for f in r.faults]} for r in res.reps]
+                        "video_t_start": video_t(r.cycle.start),
+                        "video_t_end": video_t(r.cycle.end),
+                        "faults": [_fault_dict(f, clock) for f in r.faults]} for r in res.reps]
     with open(path, "w") as fh:
         json.dump(data, fh, indent=2)
 
@@ -138,15 +196,8 @@ def _examples(res: AnalysisResult, reader: Optional[VideoReader], per_rule: int 
     """One snapshot per fault type, taken from the rep where it was worst."""
     if reader is None:
         return ""
-    worst: Dict[str, tuple] = {}
-    for r in res.reps:
-        for f in r.faults:
-            thr = res.thresholds[f.rule_id]
-            margin = abs(f.value - thr)
-            if f.rule_id not in worst or margin > worst[f.rule_id][0]:
-                worst[f.rule_id] = (margin, r, f)
     cards = []
-    for margin, r, f in sorted(worst.values(), key=lambda x: x[2].severity != "major"):
+    for r, f in worst_faults(res):
         img = snapshot(reader, res, f.frame) if f.frame >= 0 else None
         cards.append(
             f'<figure class="card">{_img_tag(img) if img is not None else ""}'
@@ -177,10 +228,6 @@ svg{width:100%;height:auto}.grid{stroke:var(--line)}.ax{fill:var(--mut);font-siz
 h3{font-size:15px;margin:22px 0 6px}.cover{fill:var(--acc);opacity:.08}
 .tick{stroke-width:2}.major-t{stroke:var(--bad)}.minor-t{stroke:var(--warn)}
 """
-
-
-MACHINE_CHARTS = (ChartSpec("m_power", "Machine power", "W"),
-                  ChartSpec("m_dps", "Distance per stroke", "m"))
 
 
 def _pace(sec: float) -> str:
@@ -313,9 +360,7 @@ def write_html(res: AnalysisResult, path: str, reader: Optional[VideoReader] = N
         f'<td class="{"yes" if d["triggered"] else "mut"}">{"yes" if d["triggered"] else "no"}</td>'
         f'<td>{esc(d["cue"]) if d["triggered"] else ""}</td></tr>' for d in s["drift"]
     ) or '<tr><td colspan="4" class="mut">Not enough reps to compare early and late.</td></tr>'
-    specs = list(st.charts)
-    if res.machine is not None and res.machine.alignment.ok:
-        specs += MACHINE_CHARTS
+    specs = chart_specs(res)
     charts = "".join(f"<h3>{esc(c.label)}{f' ({esc(c.unit)})' if c.unit else ''}</h3>"
                      f"{_chart_svg(res, c.metric, c.label, c.unit)}" for c in specs)
     cols = [c.metric for c in specs]

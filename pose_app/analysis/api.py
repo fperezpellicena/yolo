@@ -20,7 +20,12 @@ from .video import VideoInfo, VideoReader
 
 log = logging.getLogger(__name__)
 
-# (stage, frames done, frames total or 0 if unknown); stage is "pose" or "video"
+# What run_analysis writes into its output folder ("video", "report" and "reps"
+# unless turned off in the options).
+OUTPUT_FILES = {"pose_cache": "pose_cache.npz", "reps": "reps.csv", "summary": "summary.json",
+                "report": "report.html", "video": "annotated.mp4"}
+
+# (stage, frames done, frames in the clip or 0 if unknown); stage is "pose" or "video"
 ProgressFn = Callable[[str, int, int], None]
 
 
@@ -45,6 +50,8 @@ class AnalysisOptions:
     kpt_conf: float = 0.5
     device: Optional[str] = None
     video: bool = True                              # write annotated.mp4
+    report: bool = True                             # write report.html
+    csv: bool = True                                # write reps.csv
     video_width: int = 1280
     reuse: bool = False                             # reuse pose_cache.npz if present
     title: Optional[str] = None                     # report heading
@@ -84,10 +91,8 @@ def run_analysis(video_path: str, out_dir: str, opts: Optional[AnalysisOptions] 
         raise AnalysisError(str(exc)) from exc
     info = reader.info
     os.makedirs(out_dir, exist_ok=True)
-    files = {"pose_cache": os.path.join(out_dir, "pose_cache.npz"),
-             "reps": os.path.join(out_dir, "reps.csv"),
-             "summary": os.path.join(out_dir, "summary.json"),
-             "report": os.path.join(out_dir, "report.html")}
+    files = {name: os.path.join(out_dir, OUTPUT_FILES[name])
+             for name in ("pose_cache", "summary")}
     log.info(f"{info.path}: {info.width}x{info.height}, {info.fps:.1f} fps, "
              f"{info.duration:.1f} s  ->  {out_dir}")
 
@@ -100,13 +105,17 @@ def run_analysis(video_path: str, out_dir: str, opts: Optional[AnalysisOptions] 
     log.info(f"{len(res.reps)} {station.rep_word}s, "
              f"{sum(1 for r in res.reps if not r.faults)} clean.")
 
-    write_csv(res, files["reps"])
     write_json(res, files["summary"])
-    title = opts.title or f"{os.path.basename(video_path)}  ·  {info.duration:.0f} s"
-    write_html(res, files["report"], reader, title=title)
+    if opts.csv:
+        files["reps"] = os.path.join(out_dir, OUTPUT_FILES["reps"])
+        write_csv(res, files["reps"])
+    if opts.report:
+        files["report"] = os.path.join(out_dir, OUTPUT_FILES["report"])
+        title = opts.title or f"{os.path.basename(video_path)}  ·  {info.duration:.0f} s"
+        write_html(res, files["report"], reader, title=title)
     if opts.video:
         from .render import render_video
-        files["video"] = os.path.join(out_dir, "annotated.mp4")
+        files["video"] = os.path.join(out_dir, OUTPUT_FILES["video"])
         render_video(reader, res, files["video"], opts.video_width,
                      _stage(on_progress, "video"))
     return AnalysisOutcome(res, info, files, warnings + res.warnings)

@@ -51,6 +51,15 @@ class VideoReader:
         h, w = self._rotated(frame).shape[:2]
         self.info = VideoInfo(path, float(fps), count, w, h)
 
+    @property
+    def clip_frame_count(self) -> int:
+        """Frames between start and end (estimated from the frame rate), 0 if unknown."""
+        total, fps = self.info.frame_count, self.info.fps
+        if total <= 0:
+            return 0
+        last = total if self.end is None else min(total, int(self.end * fps) + 1)
+        return max(0, last - int(self.start * fps))
+
     def _rotated(self, frame: np.ndarray) -> np.ndarray:
         return cv2.rotate(frame, _ROTATIONS[self.rotate]) if self.rotate else frame
 
