@@ -8,7 +8,7 @@ import json, os, shutil, sys, tempfile, threading, time, unittest, uuid
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from synthetic_skierg import FakeEstimator, KINDS, write_video
+from synthetic_skierg import FPS, FRAMES, H, W, FakeEstimator, KINDS, write_video
 from pose_app.worker.config import WorkerConfig
 from pose_app.worker.jobs import JobStore, connect
 from pose_app.worker.worker import SCRATCH_PREFIX, Worker
@@ -70,10 +70,11 @@ def _insert(conn, job_dir, video_file="clip.mp4", options=None, **cols) -> int:
 def _row(conn, job_id):
     conn.commit()                                   # end the snapshot: see other sessions' writes
     with conn.cursor() as cur:
-        cur.execute("SELECT status, attempts, error_kind, error_message, result, worker_id "
-                    "FROM analysis_job WHERE id = %s", (job_id,))
-        status, attempts, kind, message, result, worker = cur.fetchone()
-    return {"status": status, "attempts": attempts, "error_kind": kind, "error": message,
+        cur.execute("SELECT status, attempts, error_kind, error_code, error_message, result, "
+                    "worker_id FROM analysis_job WHERE id = %s", (job_id,))
+        status, attempts, kind, code, message, result, worker = cur.fetchone()
+    return {"status": status, "attempts": attempts, "error_kind": kind, "error_code": code,
+            "error": message,
             "result": json.loads(result) if result else None, "worker": worker}
 
 
@@ -100,6 +101,8 @@ def test_job_writes_outputs_next_to_the_upload():
     assert result["reps"] == len(KINDS) and result["clean_reps"] < len(KINDS), result
     assert result["files"] == {"summary": "summary.json", "video": "annotated.mp4",
                                "pose_cache": "pose_cache.npz"}, result["files"]
+    assert result["video"] == {"duration_s": round(len(FRAMES) / FPS, 3), "width": W,
+                               "height": H}, result["video"]
     assert _listing(cfg, job_dir) == sorted(["clip.mp4", *result["files"].values()])
     with open(os.path.join(cfg.media_root, job_dir, "clip.mp4"), "rb") as fh, \
             open(_state["clip"], "rb") as orig:
@@ -113,21 +116,24 @@ def test_unusable_inputs_fail_without_retry():
         fh.write("not a video")
     shutil.copyfile(_state["clip"], os.path.join(cfg.media_root, job_dir, "annotated.mp4"))
     cases = [
-        (_insert(conn, job_dir, "junk.mp4"), "Could not open"),
-        (_insert(conn, job_dir, "missing.mp4"), "not found"),
-        (_insert(conn, job_dir, "annotated.mp4"), "reserved"),
-        (_insert(conn, job_dir, "../clip.mp4"), "not a file name"),
-        (_insert(conn, "analysis/alice/nope"), "not found"),
-        (_insert(conn, "../../etc"), "outside the media root"),
-        (_insert(conn, job_dir, options={"rotate": 45}), "rotate"),
-        (_insert(conn, job_dir, options={"model": "yolo11x-pose.pt"}), "Unknown job options"),
+        (_insert(conn, job_dir, "junk.mp4"), "unreadable_video", "Could not open"),
+        (_insert(conn, job_dir, station="sled_push"), "unsupported_station", "Unknown station"),
+        (_insert(conn, job_dir, "missing.mp4"), "invalid_job", "not found"),
+        (_insert(conn, job_dir, "annotated.mp4"), "invalid_job", "reserved"),
+        (_insert(conn, job_dir, "../clip.mp4"), "invalid_job", "not a file name"),
+        (_insert(conn, "analysis/alice/nope"), "invalid_job", "not found"),
+        (_insert(conn, "../../etc"), "invalid_job", "outside the media root"),
+        (_insert(conn, job_dir, options={"rotate": 45}), "invalid_job", "rotate"),
+        (_insert(conn, job_dir, options={"model": "yolo11x-pose.pt"}), "invalid_job",
+         "Unknown job options"),
     ]
     while _run_once(cfg):
         pass
-    for job, text in cases:
+    for job, code, text in cases:
         row = _row(conn, job)
         assert row["status"] == "FAILED" and row["error_kind"] == "input", row
-        assert row["attempts"] == 1 and text in row["error"], (text, row)
+        assert row["error_code"] == code and row["attempts"] == 1 and text in row["error"], \
+            (code, text, row)
     assert _listing(cfg, job_dir) == ["annotated.mp4", "clip.mp4", "junk.mp4"]
 
 
@@ -143,7 +149,8 @@ def test_internal_errors_retry_then_fail():
         assert _run_once(cfg, _BrokenEstimator())
         row = _row(conn, job)
         assert row["status"] == "QUEUED" and row["attempts"] == attempt, row
-        assert row["error_kind"] == "internal" and row["worker"] is None, row
+        assert row["error_kind"] == "internal" and row["error_code"] is None, row
+        assert row["worker"] is None, row
     assert _run_once(cfg, _BrokenEstimator())
     row = _row(conn, job)
     assert row["status"] == "FAILED" and "device lost" in row["error"], row

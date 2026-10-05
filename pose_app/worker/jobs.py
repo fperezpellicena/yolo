@@ -43,7 +43,6 @@ def connect(url: str) -> pymysql.connections.Connection:
     u = urlsplit(url[5:] if url.startswith("jdbc:") else url)
     if u.scheme not in ("mysql", "mysql+pymysql"):
         raise ValueError(f"expected a mysql:// database URL, got '{u.scheme}://'")
-    print(f"Connecting to MySQL database {u.path.lstrip('/')} at {u.hostname}:{u.port or 3306}, with user {u.username} and password {u.password}...");
     return pymysql.connect(host=u.hostname or "localhost", port=u.port or 3306,
                            user=unquote(u.username or ""), password=unquote(u.password or ""),
                            database=u.path.lstrip("/"), charset="utf8mb4", autocommit=False)
@@ -102,26 +101,28 @@ class JobStore:
     def succeed(self, job: Job, worker_id: str, result: Dict[str, Any]) -> bool:
         return self._execute(
             "UPDATE analysis_job SET status = 'SUCCEEDED', result = %s, progress_stage = NULL, "
-            "progress_pct = NULL, error_kind = NULL, error_message = NULL, "
+            "progress_pct = NULL, error_kind = NULL, error_code = NULL, error_message = NULL, "
             "finished_at = NOW(3) WHERE id = %s AND worker_id = %s AND status = 'RUNNING'",
             (json.dumps(result), job.id, worker_id)) == 1
 
-    def fail(self, job: Job, worker_id: str, kind: str, message: str, retry: bool) -> bool:
-        """Fail the job; with `retry` it goes back in the queue while attempts remain."""
+    def fail(self, job: Job, worker_id: str, kind: str, code: Optional[str], message: str,
+             retry: bool) -> bool:
+        """Fail the job; with `retry` it goes back in the queue while attempts remain.
+        `code` is the AnalysisError code of an 'input' failure, None for 'internal' ones."""
         status = "QUEUED" if retry else "FAILED"
         return self._execute(
-            "UPDATE analysis_job SET status = %s, error_kind = %s, error_message = %s, "
+            "UPDATE analysis_job SET status = %s, error_kind = %s, error_code = %s, error_message = %s, "
             "worker_id = IF(%s = 'QUEUED', NULL, worker_id), progress_stage = NULL, "
             "progress_pct = NULL, finished_at = IF(%s = 'FAILED', NOW(3), NULL) "
             "WHERE id = %s AND worker_id = %s AND status = 'RUNNING'",
-            (status, kind, message[:10000], status, status, job.id, worker_id)) == 1
+            (status, kind, code, message[:10000], status, status, job.id, worker_id)) == 1
 
     def recover_stale(self, stale_s: float, max_attempts: int) -> int:
         """Requeue RUNNING jobs whose heartbeat stopped; fail those out of attempts."""
         stale = ("status = 'RUNNING' AND heartbeat_at < NOW(3) - INTERVAL %s SECOND "
                  "AND attempts {} %s")
         failed = self._execute(
-            "UPDATE analysis_job SET status = 'FAILED', error_kind = 'internal', "
+            "UPDATE analysis_job SET status = 'FAILED', error_kind = 'internal', error_code = NULL, "
             "error_message = 'The worker stopped responding.', finished_at = NOW(3), "
             "progress_stage = NULL, progress_pct = NULL WHERE " + stale.format(">="),
             (stale_s, max_attempts))

@@ -82,15 +82,17 @@ def test_bad_inputs_raise_analysis_error():
         with open(bad_csv, "w") as fh:
             fh.write("not,telemetry\n1,2\n")
         cases = [
-            (os.path.join(d, "missing.mp4"), AnalysisOptions()),
-            (video, AnalysisOptions(station="no_such_station")),
-            (video, AnalysisOptions(telemetry=bad_csv)),
-            (video, AnalysisOptions(start=10_000)),
+            (os.path.join(d, "missing.mp4"), AnalysisOptions(), "unreadable_video"),
+            (video, AnalysisOptions(station="no_such_station"), "unsupported_station"),
+            (video, AnalysisOptions(telemetry=bad_csv), "unreadable_telemetry"),
+            (video, AnalysisOptions(start=10_000), "empty_clip"),
+            (video, AnalysisOptions(rotate=45), "invalid_job"),
         ]
-        for path, opts in cases:
+        for path, opts, code in cases:
             try:
                 run_analysis(path, os.path.join(d, "out"), opts, FakeEstimator())
-            except AnalysisError:
+            except AnalysisError as exc:
+                assert exc.code == code, (opts, exc.code, exc)
                 continue
             raise AssertionError(f"no AnalysisError for {opts}")
     assert "early_arm_pull" in default_thresholds("skierg")

@@ -3,7 +3,8 @@
 Used by the CLI and by anything that drives analyses as jobs (e.g. a queue
 worker). It never prints: status lines go to the `pose_app` logger, frame
 progress to an optional callback, and problems with the inputs raise
-AnalysisError with a message that is safe to show to the athlete or coach.
+AnalysisError with a code from ERROR_CODES, which callers turn into their own
+(e.g. translated) message, and an English message with the details.
 """
 
 import logging
@@ -29,8 +30,29 @@ OUTPUT_FILES = {"pose_cache": "pose_cache.npz", "reps": "reps.csv", "summary": "
 ProgressFn = Callable[[str, int, int], None]
 
 
+# Why the inputs cannot be analysed. The codes are a contract with callers such
+# as the web app, which maps each one to a message of its own: keep them stable.
+ERROR_CODES = {
+    "unreadable_video": "the video cannot be opened or has no readable frames",
+    "unreadable_telemetry": "the telemetry file cannot be read",
+    "empty_clip": "no frames between the start and end times",
+    "unsupported_station": "the station is not analysed yet",
+    "invalid_job": "the request itself is wrong (options, folder or file names): "
+                   "the caller's fault, not the athlete's",
+}
+
+
 class AnalysisError(Exception):
-    """The inputs cannot be analysed (unreadable video, bad telemetry, ...)."""
+    """The inputs cannot be analysed (unreadable video, bad telemetry, ...).
+
+    `code` is one of ERROR_CODES; the message gives the details, in English.
+    """
+
+    def __init__(self, code: str, message: str):
+        if code not in ERROR_CODES:
+            raise ValueError(f"unknown analysis error code '{code}'")
+        super().__init__(message)
+        self.code = code
 
 
 @dataclass
@@ -87,8 +109,10 @@ def run_analysis(video_path: str, out_dir: str, opts: Optional[AnalysisOptions] 
     telemetry = _load_telemetry(opts.telemetry) if opts.telemetry else None
     try:
         reader = VideoReader(video_path, opts.start, opts.end, opts.rotate)
-    except (RuntimeError, ValueError) as exc:
-        raise AnalysisError(str(exc)) from exc
+    except RuntimeError as exc:
+        raise AnalysisError("unreadable_video", str(exc)) from exc
+    except ValueError as exc:                       # a rotation it does not support
+        raise AnalysisError("invalid_job", str(exc)) from exc
     info = reader.info
     os.makedirs(out_dir, exist_ok=True)
     files = {name: os.path.join(out_dir, OUTPUT_FILES[name])
@@ -125,8 +149,8 @@ def _station(key: str):
     try:
         return STATIONS[key]
     except KeyError:
-        raise AnalysisError(f"Unknown station '{key}'; "
-                            f"expected one of {sorted(STATIONS)}.") from None
+        raise AnalysisError("unsupported_station",
+                            f"Unknown station '{key}'; expected one of {sorted(STATIONS)}.") from None
 
 
 def _load_telemetry(path: str) -> Telemetry:
@@ -134,7 +158,7 @@ def _load_telemetry(path: str) -> Telemetry:
     try:
         telemetry = clean(load_telemetry(path))
     except (OSError, ValueError) as exc:
-        raise AnalysisError(str(exc)) from exc
+        raise AnalysisError("unreadable_telemetry", str(exc)) from exc
     a, b = telemetry.active_span
     log.info(f"Machine data: {telemetry.source}, active {b - a:.0f} s.")
     return telemetry
@@ -146,8 +170,8 @@ def _extraction(reader: VideoReader, opts: AnalysisOptions, cache: str, estimato
         log.info("Reusing cached pose pass.")
         try:
             return Extraction.load(cache)
-        except ValueError as exc:
-            raise AnalysisError(str(exc)) from exc
+        except ValueError as exc:                   # a cache from another version
+            raise AnalysisError("invalid_job", str(exc)) from exc
     if estimator is None:
         from ..estimator import PoseEstimator
         estimator = PoseEstimator(opts.model, opts.conf, opts.imgsz, opts.device, opts.kpt_conf)
@@ -156,7 +180,7 @@ def _extraction(reader: VideoReader, opts: AnalysisOptions, cache: str, estimato
     try:
         ex = extract(reader, estimator.detect, tracker, opts.model, _stage(on_progress, "pose"))
     except EmptyClipError as exc:
-        raise AnalysisError(str(exc)) from exc
+        raise AnalysisError("empty_clip", str(exc)) from exc
     ex.save(cache)
     return ex
 

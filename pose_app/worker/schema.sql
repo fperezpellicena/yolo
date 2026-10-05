@@ -34,7 +34,8 @@ CREATE TABLE analysis_job (
     result          JSON          NULL,                 -- on SUCCEEDED, see Worker._result
     error_kind      VARCHAR(16)   NULL,                 -- 'input': the upload can't be analysed
                                                         -- 'internal': our fault, retried
-    error_message   TEXT          NULL,                 -- 'input' messages are safe to show users
+    error_code      VARCHAR(32)   NULL,                 -- 'input' only: see ERROR_CODES in pose_app/analysis/api.py
+    error_message   TEXT          NULL,                 -- details in English, for logs
 
     KEY idx_analysis_job_queue (status, id)
 );

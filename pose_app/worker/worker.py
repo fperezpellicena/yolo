@@ -118,12 +118,12 @@ class Worker:
                 return
             except AnalysisError as exc:
                 log.info("job %s: input rejected: %s", job.id, exc)
-                self.jobs.fail(job, self.worker_id, "input", str(exc), retry=False)
+                self.jobs.fail(job, self.worker_id, "input", exc.code, str(exc), retry=False)
                 return
             except Exception as exc:
                 retry = job.attempts < self.cfg.max_attempts
                 log.exception("job %s: failed%s", job.id, "; will retry" if retry else "")
-                self.jobs.fail(job, self.worker_id, "internal",
+                self.jobs.fail(job, self.worker_id, "internal", None,
                                f"{type(exc).__name__}: {exc}", retry)
                 return
         if self.jobs.succeed(job, self.worker_id, result):
@@ -160,19 +160,22 @@ class Worker:
             raise RuntimeError(f"media root '{root}' is not available")
         path = os.path.realpath(os.path.join(root, job.job_dir))
         if not path.startswith(root + os.sep):
-            raise AnalysisError(f"Analysis folder '{job.job_dir}' is outside the media root.")
+            raise AnalysisError("invalid_job", f"Analysis folder '{job.job_dir}' is outside the media root.")
         if not os.path.isdir(path):
-            raise AnalysisError(f"Analysis folder '{job.job_dir}' not found.")
+            raise AnalysisError("invalid_job", f"Analysis folder '{job.job_dir}' not found.")
         return path
 
     @staticmethod
     def _result(outcome: AnalysisOutcome, files: Dict[str, str]) -> Dict[str, Any]:
         """What the web app needs to list and link a finished analysis; `files` are
         names in job_dir, and the full numbers are in the `summary` file."""
-        reps, t = outcome.result.reps, outcome.result.body.t
+        reps, t, video = outcome.result.reps, outcome.result.body.t, outcome.video
         return {"files": files, "reps": len(reps),
                 "clean_reps": sum(1 for r in reps if not r.faults),
                 "analysed_s": round(float(t[-1] - t[0]), 1),      # the clip, not the file
+                # the whole uploaded file, its size as displayed (rotation applied)
+                "video": {"duration_s": round(video.duration, 3),
+                          "width": video.width, "height": video.height},
                 "warnings": outcome.warnings}
 
 
@@ -191,7 +194,7 @@ assert set(_PARSE) == set(JOB_OPTIONS)
 def job_options(job: Job, cfg: WorkerConfig) -> AnalysisOptions:
     unknown = set(job.options) - set(JOB_OPTIONS)
     if unknown:
-        raise AnalysisError(f"Unknown job options: {sorted(unknown)}.")
+        raise AnalysisError("invalid_job", f"Unknown job options: {sorted(unknown)}.")
     parsed = {}
     for key, value in job.options.items():
         if value is None:
@@ -199,8 +202,8 @@ def job_options(job: Job, cfg: WorkerConfig) -> AnalysisOptions:
         try:
             parsed[key] = _PARSE[key](value)
         except (TypeError, ValueError, AttributeError):
-            raise AnalysisError(f"Invalid job option {key}={value!r}: "
-                                f"expected {JOB_OPTIONS[key]}.") from None
+            raise AnalysisError("invalid_job", f"Invalid job option {key}={value!r}: "
+                                               f"expected {JOB_OPTIONS[key]}.") from None
     # No report.html or reps.csv: the web app builds its report from summary.json.
     return AnalysisOptions(station=job.station, model=cfg.model, imgsz=cfg.imgsz,
                            device=cfg.device, report=False, csv=False, **parsed)
@@ -217,11 +220,11 @@ def _bad(value):
 def _input(job_dir: str, name: str) -> str:
     """Path of an uploaded file, which must be a plain file name in job_dir."""
     if os.path.basename(name) != name or name in ("", ".", ".."):
-        raise AnalysisError(f"'{name}' is not a file name.")
+        raise AnalysisError("invalid_job", f"'{name}' is not a file name.")
     if name in OUTPUT_FILES.values() or name.startswith(SCRATCH_PREFIX):
-        raise AnalysisError(f"'{name}' is reserved for the analysis outputs; "
-                            "store the upload under another name.")
+        raise AnalysisError("invalid_job", f"'{name}' is reserved for the analysis outputs; "
+                                           "store the upload under another name.")
     path = os.path.join(job_dir, name)
     if not os.path.isfile(path):
-        raise AnalysisError(f"Uploaded file '{name}' not found.")
+        raise AnalysisError("invalid_job", f"Uploaded file '{name}' not found.")
     return path
