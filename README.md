@@ -64,8 +64,26 @@ whose peak -> trough -> peak is one rep, implement `summarize()` (one rep ->
 dict of numbers) and `rules()`, then register it in `stations/__init__.py`.
 Body metrics available per frame are in `analysis/body.py`.
 
-Regression tests (no model needed): `python tests/test_skierg.py` and
-`python tests/test_telemetry.py`.
+### Calling it from code
+
+`hyrox_analyze.py` is a thin wrapper around one function, which is also what a
+job worker should call:
+
+    from pose_app.analysis.api import AnalysisError, AnalysisOptions, run_analysis
+
+    outcome = run_analysis("clip.mp4", "out/", AnalysisOptions(station="skierg"),
+                           estimator=None,                  # or a PoseEstimator loaded once
+                           on_progress=lambda stage, done, total: ...)
+    outcome.files       # {"report": ..., "summary": ..., "reps": ..., "video": ..., "pose_cache": ...}
+    outcome.warnings    # messages for the athlete / coach
+
+It never prints. Status lines go to the `pose_app` logger, and unusable inputs
+(unreadable video, bad telemetry, empty clip, unknown station) raise
+`AnalysisError`, whose message is safe to show to the athlete or coach. Any
+other exception is a bug or an environment problem.
+
+Regression tests (no model needed): `python tests/test_skierg.py`,
+`python tests/test_telemetry.py` and `python tests/test_api.py`.
 
 Real-time webcam pose estimation (Ultralytics YOLO) with a responsive,
 full-screen-capable view: original feed | pose overlay | joint-angle panel.
@@ -93,6 +111,7 @@ full-screen-capable view: original feed | pose overlay | joint-angle panel.
         fps.py                  FpsMeter
         recorder.py             Recorder: fixed-size video output
         analysis/               offline Hyrox technique analysis
+            api.py              run_analysis(): one call per analysis (CLI, workers)
             cli.py              hyrox_analyze.py options
             video.py            VideoReader: file frames with real timestamps
             tracking.py         AthleteTracker: follow one person

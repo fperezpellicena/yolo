@@ -1,0 +1,78 @@
+"""run_analysis(): the entry point the CLI and a job worker share.
+
+Run: python tests/test_api.py (or pytest). No model or GPU needed.
+"""
+import json, os, sys, tempfile
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from synthetic_skierg import FakeEstimator, KINDS, STROKE_STARTS, period_of, write_video
+from synthetic_telemetry import make_tmiw_csv
+from pose_app.analysis.api import (AnalysisError, AnalysisOptions, default_thresholds,
+                                   run_analysis)
+from pose_app.analysis.cli import main
+
+
+def test_run_analysis_writes_everything():
+    with tempfile.TemporaryDirectory() as d:
+        video = os.path.join(d, "ski.mp4")
+        write_video(video)
+        out = os.path.join(d, "out")
+        seen = []
+        opts = AnalysisOptions(model="fake", thresholds={"no_such_rule": 1.0})
+        outcome = run_analysis(video, out, opts, FakeEstimator(),
+                               lambda stage, done, total: seen.append(stage))
+
+        assert len(outcome.result.reps) == len(KINDS)
+        assert set(outcome.files) == {"report", "summary", "reps", "video", "pose_cache"}
+        assert all(os.path.getsize(p) > 0 for p in outcome.files.values())
+        assert {"pose", "video"} <= set(seen)
+        assert "no_such_rule" in outcome.warnings[0]
+        with open(outcome.files["summary"]) as fh:
+            assert json.load(fh)
+
+        # Reuse the cached pose pass without any estimator, as the CLI does.
+        again = run_analysis(video, out, AnalysisOptions(reuse=True, video=False))
+        assert len(again.result.reps) == len(KINDS) and "video" not in again.files
+        assert main([video, "--out", out, "--reuse", "--no-video"]) == 0
+
+
+def test_run_analysis_with_telemetry():
+    with tempfile.TemporaryDirectory() as d:
+        video = os.path.join(d, "ski.mp4")
+        write_video(video)
+        csv = os.path.join(d, "t.csv")
+        make_tmiw_csv(csv, STROKE_STARTS, [int(period_of(n) * 30) / 30 for n in range(len(KINDS))],
+                      KINDS, log_start=STROKE_STARTS[0] - 0.3)
+        outcome = run_analysis(video, os.path.join(d, "out"),
+                               AnalysisOptions(telemetry=csv, video=False), FakeEstimator())
+        assert outcome.result.machine is not None
+
+
+def test_bad_inputs_raise_analysis_error():
+    with tempfile.TemporaryDirectory() as d:
+        video = os.path.join(d, "ski.mp4")
+        write_video(video)
+        bad_csv = os.path.join(d, "bad.csv")
+        with open(bad_csv, "w") as fh:
+            fh.write("not,telemetry\n1,2\n")
+        cases = [
+            (os.path.join(d, "missing.mp4"), AnalysisOptions()),
+            (video, AnalysisOptions(station="no_such_station")),
+            (video, AnalysisOptions(telemetry=bad_csv)),
+            (video, AnalysisOptions(start=10_000)),
+        ]
+        for path, opts in cases:
+            try:
+                run_analysis(path, os.path.join(d, "out"), opts, FakeEstimator())
+            except AnalysisError:
+                continue
+            raise AssertionError(f"no AnalysisError for {opts}")
+    assert "early_arm_pull" in default_thresholds("skierg")
+
+
+if __name__ == "__main__":
+    for name, fn in list(globals().items()):
+        if name.startswith("test_"):
+            fn()
+            print(f"{name}: ok")

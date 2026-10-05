@@ -1,7 +1,7 @@
 """Annotated output video: skeleton, live metrics, rep counter and cues."""
 
-import sys
-from typing import List, Optional, Tuple
+import logging
+from typing import Callable, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -11,6 +11,8 @@ from ..ui.text import darken, text_size, thickness
 from ..ui.theme import AA, ACCENT, FONT, TEXT
 from .pipeline import AnalysisResult
 from .video import VideoReader
+
+log = logging.getLogger(__name__)
 
 GOOD = (90, 200, 90)
 MINOR = (0, 180, 255)
@@ -162,28 +164,26 @@ class Annotator:
 
 
 def render_video(reader: VideoReader, res: AnalysisResult, path: str,
-                 max_width: int = 1280, progress: bool = True) -> None:
+                 max_width: int = 1280,
+                 on_progress: Optional[Callable[[int, int], None]] = None) -> None:
+    """`on_progress(frame number, frame count)` is called after every frame."""
     info = reader.info
     scale = min(1.0, max_width / info.width)
     size = (int(info.width * scale) // 2 * 2, int(info.height * scale) // 2 * 2)
     writer = _open_writer(path, info.fps, size)
     if writer is None:
-        print(f"Could not write '{path}'.", file=sys.stderr)
-        return
+        raise RuntimeError(f"Could not write '{path}'.")
     ann = Annotator(res)
     try:
-        for n, (index, _, frame) in enumerate(reader.frames(), 1):
+        for index, _, frame in reader.frames():
             out = ann.draw(frame, index)
             if scale != 1.0:
                 out = cv2.resize(out, size, interpolation=cv2.INTER_AREA)
             writer.write(out)
-            if progress and n % 50 == 0:
-                print(f"\r  video: frame {index + 1}/{info.frame_count}", end="",
-                      file=sys.stderr, flush=True)
+            if on_progress:
+                on_progress(index + 1, info.frame_count)
     finally:
         writer.release()
-        if progress:
-            print(file=sys.stderr)
 
 
 def snapshot(reader: VideoReader, res: AnalysisResult, frame_index: int,
@@ -204,8 +204,7 @@ def _open_writer(path: str, fps: float, size: Tuple[int, int]) -> Optional[cv2.V
         writer = cv2.VideoWriter(path, cv2.VideoWriter.fourcc(*fourcc), fps, size)
         if writer.isOpened():
             if fourcc != "avc1":
-                print("  H.264 encoder unavailable; the video will not play in web browsers.",
-                      file=sys.stderr)
+                log.warning("H.264 encoder unavailable; the video will not play in web browsers.")
             return writer
         writer.release()
     return None

@@ -25,7 +25,7 @@ def _extraction(d):
     write_video(video)
     reader = VideoReader(video)
     ex = extract(reader, FakeEstimator().detect,
-                 AthleteTracker("largest", frame_size=(960, 720)), "fake", progress=False)
+                 AthleteTracker("largest", frame_size=(960, 720)), "fake")
     return ex, reader
 
 

@@ -22,7 +22,7 @@ def test_skierg_pipeline():
         write_video(video)
         reader = VideoReader(video)
         ex = extract(reader, FakeEstimator().detect,
-                     AthleteTracker("largest", frame_size=(960, 720)), "fake", progress=False)
+                     AthleteTracker("largest", frame_size=(960, 720)), "fake")
         ex.save(os.path.join(d, "cache.npz"))
         ex = Extraction.load(os.path.join(d, "cache.npz"))
         res = analyze(ex, STATIONS["skierg"])

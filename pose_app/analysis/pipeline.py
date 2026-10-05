@@ -1,7 +1,5 @@
 """Pass 1 (pose extraction, cacheable) and the analysis that runs on it."""
 
-import sys
-import time
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional
 
@@ -18,6 +16,10 @@ from .tracking import AthleteTracker
 from .video import VideoReader
 
 CACHE_VERSION = 1
+
+
+class EmptyClipError(RuntimeError):
+    """No frames were read in the requested clip."""
 
 
 @dataclass
@@ -51,11 +53,12 @@ class Extraction:
 
 
 def extract(reader: VideoReader, detect: Callable[[np.ndarray], List[Person]],
-            tracker: AthleteTracker, model_name: str = "", progress: bool = True) -> Extraction:
+            tracker: AthleteTracker, model_name: str = "",
+            on_progress: Optional[Callable[[int, int], None]] = None) -> Extraction:
+    """`on_progress(frame number, frame count)` is called after every frame."""
     ts, idxs, kps, scs, boxes = [], [], [], [], []
     total = reader.info.frame_count
-    started = time.perf_counter()
-    for n, (index, t, frame) in enumerate(reader.frames(), 1):
+    for index, t, frame in reader.frames():
         athlete = tracker.select(detect(frame))
         ts.append(t)
         idxs.append(index)
@@ -67,14 +70,10 @@ def extract(reader: VideoReader, detect: Callable[[np.ndarray], List[Person]],
             kps.append(athlete.keypoints.astype(float))
             scs.append(athlete.scores.astype(float))
             boxes.append(athlete.box.astype(float))
-        if progress and n % 25 == 0:
-            rate = n / (time.perf_counter() - started)
-            print(f"\r  pose: frame {index + 1}/{total or '?'}  ({rate:.1f} fps)",
-                  end="", file=sys.stderr, flush=True)
-    if progress:
-        print(file=sys.stderr)
+        if on_progress:
+            on_progress(index + 1, total)
     if not ts:
-        raise RuntimeError("No frames were read (check --start/--end).")
+        raise EmptyClipError("No frames were read (check the start and end times).")
     info = reader.info
     return Extraction(info.path, info.fps, (info.width, info.height), model_name,
                       np.array(ts), np.array(idxs), np.array(kps), np.array(scs),
