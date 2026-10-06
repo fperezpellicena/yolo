@@ -2,6 +2,7 @@
 *.zip
 *.pt
 *.pyc
+*.log
 .DS_*
 
 .idea/
