@@ -1,8 +1,9 @@
 """Queue worker: runs analyses requested by the web app.
 
-    analysis_jobs row (MySQL) --claim--> run_analysis() on the files in its job_dir
-        -> outputs written next to them -> row SUCCEEDED / FAILED
+    POST /internal/jobs/claim --> run_analysis() on the uploads the job names
+        -> outputs written next to them, report sent back -> complete / fail
 
 Start with `python -m pose_app.worker`; settings are in config.py and the
-table contract in schema.sql.
+API contract in jobs.py. The worker talks to the web app only through its
+internal HTTP API, and shares only the media folder with it.
 """

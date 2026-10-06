@@ -1,23 +1,31 @@
-"""The loop: claim a job, analyse the files in its folder, write the outputs there."""
+"""The loop: claim a job, analyse its uploads, write the outputs next to them and
+report the outcome to the web app."""
 
 import glob
+import json
 import logging
 import os
+import posixpath
 import shutil
 import socket
 import tempfile
 import threading
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from ..analysis.api import (OUTPUT_FILES, AnalysisError, AnalysisOptions, AnalysisOutcome,
                             run_analysis)
 from ..analysis.tracking import SELECT_MODES
 from .config import WorkerConfig
-from .jobs import JOB_OPTIONS, Job, JobStore
+from .jobs import JOB_OPTIONS, ApiError, Job, JobClient
 
 log = logging.getLogger(__name__)
 
-SCRATCH_PREFIX = ".analysis-tmp-"       # work folder inside job_dir while a job runs
+SCRATCH_PREFIX = ".analysis-tmp-"       # work folder inside the output folder while a job runs
+
+# Outputs moved next to the uploads, by their names in AnalysisOutcome.files and
+# in the web app. The summary is not among them: it is sent as the report, and
+# the web app stores it once it has checked it.
+KEPT_OUTPUTS = {"video": "annotated_video", "pose_cache": "pose_cache"}
 
 
 class JobLost(Exception):
@@ -25,15 +33,15 @@ class JobLost(Exception):
 
 
 class Heartbeat:
-    """Writes the job's heartbeat and progress from a background thread.
+    """Reports the job's progress from a background thread, which also tells the
+    web app that the worker is alive.
 
-    It has its own database connection, so the analysis thread never waits on
-    the database; the analysis thread learns that the job was lost through
-    `progress()`, which then raises JobLost to stop the work early.
+    The analysis thread never waits on the web app; it learns that the job was
+    lost through `progress()`, which then raises JobLost to stop the work early.
     """
 
-    def __init__(self, cfg: WorkerConfig, worker_id: str, job: Job):
-        self.cfg, self.worker_id, self.job = cfg, worker_id, job
+    def __init__(self, cfg: WorkerConfig, jobs: JobClient, worker_id: str, job: Job):
+        self.cfg, self.jobs, self.worker_id, self.job = cfg, jobs, worker_id, job
         self.stage: Optional[str] = None
         self.pct: Optional[int] = None
         self.lost = False
@@ -42,19 +50,17 @@ class Heartbeat:
                                         daemon=True)
 
     def __enter__(self) -> "Heartbeat":
-        self.store = JobStore(self.cfg.database_url)
         self._thread.start()
         return self
 
     def __exit__(self, *exc) -> None:
         self._stop.set()
         self._thread.join()
-        self.store.close()
 
     def _run(self) -> None:
         while not self._stop.wait(self.cfg.heartbeat_s):
             try:
-                if not self.store.heartbeat(self.job, self.worker_id, self.stage, self.pct):
+                if not self.jobs.progress(self.job, self.worker_id, self.stage, self.pct):
                     self.lost = True
                     return
             except Exception:
@@ -70,7 +76,7 @@ class Heartbeat:
 
 
 class Worker:
-    def __init__(self, cfg: WorkerConfig, jobs: JobStore, estimator=None,
+    def __init__(self, cfg: WorkerConfig, jobs: JobClient, estimator=None,
                  worker_id: Optional[str] = None):
         """`estimator` defaults to a PoseEstimator built from `cfg`, loaded once."""
         if not os.path.isdir(cfg.media_root):
@@ -98,79 +104,90 @@ class Worker:
 
     def run_once(self) -> bool:
         """Process one job; False if the queue was empty."""
-        recovered = self.jobs.recover_stale(self.cfg.stale_s, self.cfg.max_attempts)
-        if recovered:
-            log.warning("recovered %d job(s) from unresponsive workers", recovered)
-        job = self.jobs.claim(self.worker_id)
+        job = self.jobs.claim_next(self.worker_id)
         if job is None:
             return False
-        log.info("job %s: %s/%s, attempt %d", job.id, job.job_dir, job.video_file,
-                 job.attempts)
+        log.info("job %s: %s, attempt %d", job.id, job.video, job.attempt)
         self.process(job)
         return True
 
     def process(self, job: Job) -> None:
-        with Heartbeat(self.cfg, self.worker_id, job) as hb:
+        """Run the job and report its outcome. The web app decides whether a failed
+        job is retried."""
+        with Heartbeat(self.cfg, self.jobs, self.worker_id, job) as hb:
             try:
-                result = self._analyse(job, hb)
+                outputs, result, report = self._analyse(job, hb)
             except JobLost:
                 log.warning("job %s: cancelled or reassigned; dropped", job.id)
                 return
             except AnalysisError as exc:
                 log.info("job %s: input rejected: %s", job.id, exc)
-                self.jobs.fail(job, self.worker_id, "input", exc.code, str(exc), retry=False)
+                self._fail(job, exc.code, str(exc), retryable=False)
                 return
             except Exception as exc:
-                retry = job.attempts < self.cfg.max_attempts
-                log.exception("job %s: failed%s", job.id, "; will retry" if retry else "")
-                self.jobs.fail(job, self.worker_id, "internal", None,
-                               f"{type(exc).__name__}: {exc}", retry)
+                log.exception("job %s: failed", job.id)
+                self._fail(job, None, f"{type(exc).__name__}: {exc}", retryable=True)
                 return
-        if self.jobs.succeed(job, self.worker_id, result):
+        try:
+            completed = self.jobs.complete(job, self.worker_id, outputs, result, report)
+        except ApiError as exc:                         # e.g. a report it cannot read
+            log.error("job %s: the web app refused the outcome: %s", job.id, exc)
+            self._fail(job, None, f"Outcome refused: {exc}", retryable=True)
+            return
+        if completed:
             log.info("job %s: done, %d reps", job.id, result["reps"])
         else:
             log.warning("job %s: finished, but it was cancelled or reassigned meanwhile", job.id)
 
-    def _analyse(self, job: Job, hb: Heartbeat) -> Dict[str, Any]:
-        """Analyse in a scratch folder inside job_dir, then move the outputs next to
-        the inputs: a move within one disk is atomic, so the web app never serves a
-        half-written file, and a failed or cancelled job leaves nothing behind."""
+    def _fail(self, job: Job, code: Optional[str], message: str, retryable: bool) -> None:
+        if not self.jobs.fail(job, self.worker_id, code, message, retryable):
+            log.warning("job %s: failed, but it was cancelled or reassigned meanwhile", job.id)
+
+    def _analyse(self, job: Job, hb: Heartbeat) -> Tuple[Dict[str, str], Dict[str, Any],
+                                                            Dict[str, Any]]:
+        """Analyse in a scratch folder inside the output folder, then move the outputs
+        in: a move within one disk is atomic, so the web app never serves a
+        half-written file, and a failed or cancelled job leaves nothing behind.
+
+        Returns the keys of the outputs, the result and the report (summary.json)."""
         opts = job_options(job, self.cfg)
-        job_dir = self._job_dir(job)
-        video = _input(job_dir, job.video_file)
-        if job.telemetry_file:
-            opts.telemetry = _input(job_dir, job.telemetry_file)
-        for old in glob.glob(os.path.join(job_dir, SCRATCH_PREFIX + "*")):
+        root = self._media_root()
+        out_dir = _resolve(root, job.output_dir, "Output folder")
+        if not os.path.isdir(out_dir):
+            raise AnalysisError("invalid_job", f"Output folder '{job.output_dir}' not found.")
+        video = _input(root, job.video)
+        if job.telemetry:
+            opts.telemetry = _input(root, job.telemetry)
+        for old in glob.glob(os.path.join(out_dir, SCRATCH_PREFIX + "*")):
             shutil.rmtree(old, ignore_errors=True)      # left by a worker that died
-        work = tempfile.mkdtemp(prefix=SCRATCH_PREFIX, dir=job_dir)
+        work = tempfile.mkdtemp(prefix=SCRATCH_PREFIX, dir=out_dir)
         try:
             outcome = run_analysis(video, work, opts, self.estimator, hb.progress)
             hb.check()
-            files = {}
-            for name, path in outcome.files.items():
-                files[name] = os.path.basename(path)
-                os.replace(path, os.path.join(job_dir, files[name]))
+            with open(outcome.files["summary"], encoding="utf-8") as fh:
+                report = json.load(fh)
+            outputs = {}
+            for name, key in KEPT_OUTPUTS.items():
+                if name in outcome.files:
+                    file_name = os.path.basename(outcome.files[name])
+                    os.replace(outcome.files[name], os.path.join(out_dir, file_name))
+                    outputs[key] = posixpath.join(job.output_dir, file_name)
         finally:
             shutil.rmtree(work, ignore_errors=True)
-        return self._result(outcome, files)
+        return outputs, self._result(outcome), report
 
-    def _job_dir(self, job: Job) -> str:
+    def _media_root(self) -> str:
         root = os.path.realpath(self.cfg.media_root)
         if not os.path.isdir(root):                     # e.g. a network mount is down: retry
             raise RuntimeError(f"media root '{root}' is not available")
-        path = os.path.realpath(os.path.join(root, job.job_dir))
-        if not path.startswith(root + os.sep):
-            raise AnalysisError("invalid_job", f"Analysis folder '{job.job_dir}' is outside the media root.")
-        if not os.path.isdir(path):
-            raise AnalysisError("invalid_job", f"Analysis folder '{job.job_dir}' not found.")
-        return path
+        return root
 
     @staticmethod
-    def _result(outcome: AnalysisOutcome, files: Dict[str, str]) -> Dict[str, Any]:
-        """What the web app needs to list and link a finished analysis; `files` are
-        names in job_dir, and the full numbers are in the `summary` file."""
+    def _result(outcome: AnalysisOutcome) -> Dict[str, Any]:
+        """What the web app needs to list a finished analysis; the full numbers are
+        in the report."""
         reps, t, video = outcome.result.reps, outcome.result.body.t, outcome.video
-        return {"files": files, "reps": len(reps),
+        return {"reps": len(reps),
                 "clean_reps": sum(1 for r in reps if not r.faults),
                 "analysed_s": round(float(t[-1] - t[0]), 1),      # the clip, not the file
                 # the whole uploaded file, its size as displayed (rotation applied)
@@ -179,7 +196,7 @@ class Worker:
                 "warnings": outcome.warnings}
 
 
-# Converts each JSON value in analysis_jobs.options to what AnalysisOptions expects.
+# Converts each JSON value in a job's options to what AnalysisOptions expects.
 _PARSE = {
     "start": float, "end": float, "telemetry_offset": float,
     "rotate": lambda v: _one_of(int(v), (0, 90, 180, 270)),
@@ -204,7 +221,7 @@ def job_options(job: Job, cfg: WorkerConfig) -> AnalysisOptions:
         except (TypeError, ValueError, AttributeError):
             raise AnalysisError("invalid_job", f"Invalid job option {key}={value!r}: "
                                                f"expected {JOB_OPTIONS[key]}.") from None
-    # No report.html or reps.csv: the web app builds its report from summary.json.
+    # No report.html or reps.csv: the web app builds its report from the summary.
     return AnalysisOptions(station=job.station, model=cfg.model, imgsz=cfg.imgsz,
                            device=cfg.device, report=False, csv=False, **parsed)
 
@@ -217,14 +234,21 @@ def _bad(value):
     raise ValueError(value)
 
 
-def _input(job_dir: str, name: str) -> str:
-    """Path of an uploaded file, which must be a plain file name in job_dir."""
-    if os.path.basename(name) != name or name in ("", ".", ".."):
-        raise AnalysisError("invalid_job", f"'{name}' is not a file name.")
+def _resolve(root: str, key: str, what: str) -> str:
+    """Path of a file key, which must stay inside the media root."""
+    path = os.path.realpath(os.path.join(root, key))
+    if not key or os.path.isabs(key) or not path.startswith(root + os.sep):
+        raise AnalysisError("invalid_job", f"{what} '{key}' is outside the media root.")
+    return path
+
+
+def _input(root: str, key: str) -> str:
+    """Path of an uploaded file, whose name must not be one the outputs take."""
+    name = posixpath.basename(key)
     if name in OUTPUT_FILES.values() or name.startswith(SCRATCH_PREFIX):
         raise AnalysisError("invalid_job", f"'{name}' is reserved for the analysis outputs; "
                                            "store the upload under another name.")
-    path = os.path.join(job_dir, name)
+    path = _resolve(root, key, "Uploaded file")
     if not os.path.isfile(path):
-        raise AnalysisError("invalid_job", f"Uploaded file '{name}' not found.")
+        raise AnalysisError("invalid_job", f"Uploaded file '{key}' not found.")
     return path

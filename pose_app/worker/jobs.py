@@ -1,19 +1,36 @@
-"""The analysis_jobs table (schema.sql) used as a queue.
+"""The web app's job queue, as the worker sees it.
 
-Workers claim jobs with SELECT ... FOR UPDATE SKIP LOCKED, so any number of
-them can poll the same table without taking the same job twice. A running job
-carries a heartbeat; a job whose heartbeat stops (worker killed, machine lost)
-is put back in the queue, or failed once it has used up its attempts.
+The worker only knows the JobClient interface: claim the next job, report its
+progress, then complete or fail it. HttpJobClient implements it with the
+internal API of the web app (Spring), which alone owns the queue and its
+database: the worker needs no database driver or credentials, and no
+knowledge of the schema. Another transport, such as a message broker, would
+be a second implementation of the same interface.
+
+    POST {api}/internal/jobs/claim            {worker}                     -> 200 job | 204
+    POST {api}/internal/jobs/{id}/progress    {worker, stage, progress}    -> 204 | 409
+    POST {api}/internal/jobs/{id}/complete    {worker, outputs, result, report} -> 204 | 409 | 422
+    POST {api}/internal/jobs/{id}/fail        {worker, code, message, retryable} -> 204 | 409
+
+409 means the job is no longer ours (cancelled, or given to another worker
+after we went silent): the worker drops it. Progress doubles as the
+heartbeat; the web app requeues a job that stays silent too long, and decides
+whether a failed job is retried.
 """
 
 import json
+import logging
+import threading
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
-from urllib.parse import unquote, urlsplit
+from typing import Any, Dict, Optional, Protocol
 
-import pymysql
+import requests
+from tenacity import (Retrying, before_sleep_log, retry_if_exception, stop_after_delay,
+                      wait_exponential)
 
-# Keys the web app may put in analysis_jobs.options, all optional. Model and
+log = logging.getLogger(__name__)
+
+# Keys the web app may put in a job's options, all optional. Model and
 # hardware settings are the worker's own (see config.py), not per job.
 JOB_OPTIONS = {
     "start": "clip start in seconds",
@@ -31,106 +48,120 @@ JOB_OPTIONS = {
 class Job:
     id: int
     station: str
-    job_dir: str                    # relative to the media root
-    video_file: str                  # in job_dir
-    telemetry_file: Optional[str]
+    video: str                      # key of the uploaded video: a path relative to the media root
+    telemetry: Optional[str]        # key of the machine data CSV, if any
+    output_dir: str                 # key of the folder to write the outputs in
     options: Dict[str, Any]
-    attempts: int                   # including this one
+    attempt: int                    # 1 on the first run
 
 
-def connect(url: str) -> pymysql.connections.Connection:
-    """`mysql://user:password@host:3306/database` (a `jdbc:` prefix is ignored)."""
-    u = urlsplit(url[5:] if url.startswith("jdbc:") else url)
-    if u.scheme not in ("mysql", "mysql+pymysql"):
-        raise ValueError(f"expected a mysql:// database URL, got '{u.scheme}://'")
-    return pymysql.connect(host=u.hostname or "localhost", port=u.port or 3306,
-                           user=unquote(u.username or ""), password=unquote(u.password or ""),
-                           database=u.path.lstrip("/"), charset="utf8mb4", autocommit=False)
+class JobClient(Protocol):
+    """The queue. The calls about a job return False when it is no longer ours."""
+
+    def claim_next(self, worker_id: str) -> Optional[Job]:
+        """Take the oldest queued job, or None if there is none."""
+
+    def progress(self, job: Job, worker_id: str, stage: Optional[str], pct: Optional[int]) -> bool:
+        """Record progress; also tells the queue that the worker is alive."""
+
+    def complete(self, job: Job, worker_id: str, outputs: Dict[str, str],
+                 result: Dict[str, Any], report: Dict[str, Any]) -> bool:
+        """`outputs` maps output names to keys; `report` is the summary.json content."""
+
+    def fail(self, job: Job, worker_id: str, code: Optional[str], message: str,
+             retryable: bool) -> bool:
+        """`code` is the AnalysisError code of an unusable input (then not
+        `retryable`), None for the worker's own failures."""
 
 
-class JobStore:
-    """One connection, used from one thread at a time."""
+class ApiError(Exception):
+    """The web app refused a call: a bad token, an outcome it cannot take, a bug."""
 
-    def __init__(self, url: str):
-        self.url = url
-        self.conn = connect(url)
+    def __init__(self, status: int, detail: str):
+        super().__init__(f"HTTP {status}: {detail}")
+        self.status = status
 
-    def _execute(self, sql: str, args=()) -> int:
-        self.conn.ping(reconnect=True)
-        try:
-            with self.conn.cursor() as cur:
-                n = cur.execute(sql, args)
-            self.conn.commit()
-            return n
-        except Exception:
-            self.conn.rollback()
-            raise
 
-    def claim(self, worker_id: str) -> Optional[Job]:
-        """Take the oldest QUEUED job, or None if there is none."""
-        self.conn.ping(reconnect=True)
-        try:
-            with self.conn.cursor() as cur:
-                cur.execute("SELECT id, station, job_dir, video_file, telemetry_file, options, attempts "
-                            "FROM analysis_jobs WHERE status = 'QUEUED' "
-                            "ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED")
-                row = cur.fetchone()
-                if row is not None:
-                    cur.execute("UPDATE analysis_jobs SET status = 'RUNNING', worker_id = %s, "
-                                "attempts = attempts + 1, started_at = NOW(3), "
-                                "heartbeat_at = NOW(3), progress_stage = NULL, "
-                                "progress_pct = NULL WHERE id = %s", (worker_id, row[0]))
-            self.conn.commit()
-        except Exception:
-            self.conn.rollback()
-            raise
-        if row is None:
+class _Unavailable(Exception):
+    """A 5xx answer, as while the web app restarts: worth retrying."""
+
+
+def _transient(exc: BaseException) -> bool:
+    return isinstance(exc, (requests.ConnectionError, requests.Timeout, _Unavailable))
+
+
+class HttpJobClient:
+    """JobClient over the web app's internal API. Safe to use from several threads
+    (the heartbeat runs in its own): each thread gets its own HTTP session.
+
+    Calls that fail because the web app is unreachable or answers 5xx are
+    retried with exponential backoff for up to `retry_s` seconds, so a restart
+    of the web app goes unnoticed; after that the error is raised.
+    """
+
+    def __init__(self, base_url: str, token: str, timeout_s: float = 30.0, retry_s: float = 60.0):
+        self.base_url = base_url.rstrip("/") + "/internal/jobs"
+        self.token = token
+        self.timeout_s = timeout_s
+        self.retry_s = retry_s
+        self._local = threading.local()
+
+    def claim_next(self, worker_id: str) -> Optional[Job]:
+        status, body = self._post("/claim", {"worker": worker_id})
+        if status == 204:
             return None
-        job_id, station, job_dir, video_file, telemetry_file, options, attempts = row
-        return Job(job_id, station, job_dir, video_file, telemetry_file,
-                   json.loads(options) if options else {}, attempts + 1)
+        inputs = body["inputs"]
+        return Job(id=body["id"], station=body["station"], video=inputs["video"],
+                   telemetry=inputs.get("telemetry"), output_dir=body["output_dir"],
+                   options=body.get("options") or {}, attempt=body["attempt"])
 
-    def heartbeat(self, job: Job, worker_id: str, stage: Optional[str],
-                  pct: Optional[int]) -> bool:
-        """Record progress; False if the job is no longer ours (cancelled or reclaimed)."""
-        return self._execute(
-            "UPDATE analysis_jobs SET heartbeat_at = NOW(3), progress_stage = %s, "
-            "progress_pct = %s WHERE id = %s AND worker_id = %s AND status = 'RUNNING'",
-            (stage, pct, job.id, worker_id)) == 1
+    def progress(self, job: Job, worker_id: str, stage: Optional[str], pct: Optional[int]) -> bool:
+        return self._report(job, "progress", {"worker": worker_id, "stage": stage, "progress": pct})
 
-    def succeed(self, job: Job, worker_id: str, result: Dict[str, Any]) -> bool:
-        return self._execute(
-            "UPDATE analysis_jobs SET status = 'SUCCEEDED', result = %s, progress_stage = NULL, "
-            "progress_pct = NULL, error_kind = NULL, error_code = NULL, error_message = NULL, "
-            "finished_at = NOW(3) WHERE id = %s AND worker_id = %s AND status = 'RUNNING'",
-            (json.dumps(result), job.id, worker_id)) == 1
+    def complete(self, job: Job, worker_id: str, outputs: Dict[str, str],
+                 result: Dict[str, Any], report: Dict[str, Any]) -> bool:
+        return self._report(job, "complete", {"worker": worker_id, "outputs": outputs,
+                                              "result": result, "report": report})
 
-    def fail(self, job: Job, worker_id: str, kind: str, code: Optional[str], message: str,
-             retry: bool) -> bool:
-        """Fail the job; with `retry` it goes back in the queue while attempts remain.
-        `code` is the AnalysisError code of an 'input' failure, None for 'internal' ones."""
-        status = "QUEUED" if retry else "FAILED"
-        return self._execute(
-            "UPDATE analysis_jobs SET status = %s, error_kind = %s, error_code = %s, error_message = %s, "
-            "worker_id = IF(%s = 'QUEUED', NULL, worker_id), progress_stage = NULL, "
-            "progress_pct = NULL, finished_at = IF(%s = 'FAILED', NOW(3), NULL) "
-            "WHERE id = %s AND worker_id = %s AND status = 'RUNNING'",
-            (status, kind, code, message[:10000], status, status, job.id, worker_id)) == 1
-
-    def recover_stale(self, stale_s: float, max_attempts: int) -> int:
-        """Requeue RUNNING jobs whose heartbeat stopped; fail those out of attempts."""
-        stale = ("status = 'RUNNING' AND heartbeat_at < NOW(3) - INTERVAL %s SECOND "
-                 "AND attempts {} %s")
-        failed = self._execute(
-            "UPDATE analysis_jobs SET status = 'FAILED', error_kind = 'internal', error_code = NULL, "
-            "error_message = 'The worker stopped responding.', finished_at = NOW(3), "
-            "progress_stage = NULL, progress_pct = NULL WHERE " + stale.format(">="),
-            (stale_s, max_attempts))
-        requeued = self._execute(
-            "UPDATE analysis_jobs SET status = 'QUEUED', worker_id = NULL, "
-            "progress_stage = NULL, progress_pct = NULL WHERE " + stale.format("<"),
-            (stale_s, max_attempts))
-        return failed + requeued
+    def fail(self, job: Job, worker_id: str, code: Optional[str], message: str,
+             retryable: bool) -> bool:
+        return self._report(job, "fail", {"worker": worker_id, "code": code,
+                                          "message": message, "retryable": retryable})
 
     def close(self) -> None:
-        self.conn.close()
+        session = getattr(self._local, "session", None)
+        if session is not None:
+            session.close()
+
+    def _report(self, job: Job, action: str, body: Dict[str, Any]) -> bool:
+        status, _ = self._post(f"/{job.id}/{action}", body)
+        return status != 409
+
+    def _post(self, path: str, body: Dict[str, Any]):
+        """(status, parsed body or None). 409 is returned; other 4xx raise ApiError."""
+        retrying = Retrying(retry=retry_if_exception(_transient), reraise=True,
+                            wait=wait_exponential(multiplier=0.5, max=10),
+                            stop=stop_after_delay(self.retry_s),
+                            before_sleep=before_sleep_log(log, logging.WARNING))
+        return retrying(self._post_once, path, body)
+
+    def _post_once(self, path: str, body: Dict[str, Any]):
+        # json.dumps writes NaN for values Python could not measure; requests'
+        # own json= refuses them. The web app reads them.
+        response = self._session().post(self.base_url + path, data=json.dumps(body),
+                                        timeout=self.timeout_s,
+                                        headers={"Content-Type": "application/json"})
+        if response.status_code >= 500:
+            raise _Unavailable(f"HTTP {response.status_code} on {path}")
+        if response.status_code in (200, 201):
+            return response.status_code, response.json()
+        if response.status_code in (204, 409):
+            return response.status_code, None
+        raise ApiError(response.status_code, response.text[:1000] or response.reason)
+
+    def _session(self) -> requests.Session:
+        session = getattr(self._local, "session", None)
+        if session is None:
+            session = self._local.session = requests.Session()
+            session.headers["Authorization"] = f"Bearer {self.token}"
+        return session

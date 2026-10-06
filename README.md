@@ -84,50 +84,57 @@ other exception is a bug or an environment problem.
 
 ### Queue worker (for the web app)
 
-The web app saves the uploads in a folder per analysis and inserts a row into
-the `analysis_jobs` table; the worker analyses the files in place and writes
-its outputs into the same folder:
+The web app (Spring) owns the job queue and its database. The worker never
+touches the database: it is a plain HTTP client of the web app's internal
+API, and the two share only the media folder, where the web app saves the
+uploads and the worker writes its outputs next to them:
 
-    analysis_jobs QUEUED --claim--> run_analysis() on <media root>/<job_dir>/<video_file>
-        -> summary.json, annotated.mp4, pose_cache.npz written next to it
-        -> SUCCEEDED / FAILED
+    POST /internal/jobs/claim --> run_analysis() on <media root>/<inputs.video>
+        -> annotated.mp4, pose_cache.npz written in <media root>/<output_dir>
+        -> POST /internal/jobs/{id}/complete with the report (summary.json) / .../fail
 
     pip install -r requirements-worker.txt
-    export WORKER_DATABASE_URL=mysql://user:password@db:3306/hyrox
-    export WORKER_MEDIA_ROOT=/srv/media      # where the web app's media folder is mounted
+    export WORKER_API_URL=http://web:8081      # the web app's internal API port
+    export WORKER_API_TOKEN=...                # the web app's WORKER_API_TOKEN
+    export WORKER_MEDIA_ROOT=/srv/media        # where the web app's media folder is mounted
     python -m pose_app.worker
 
 The settings can also go in a `.env` file (same `NAME=value` lines) in the
 folder you start the worker from, or a parent folder; variables already set
 in the environment take precedence. `.env` is git-ignored.
 
-* Table contract: `pose_app/worker/schema.sql` (MySQL 8). The web app owns
-  the table through its migrations and may add columns, e.g. `user_id`.
-* `job_dir` is relative to the media root (e.g. `analysis/alice/<uuid>`), and
-  `video_file` / `telemetry_file` are file names in it. Each side sets its own
-  root, so the web app and the worker can mount the disk in different places.
-  Uploads must not use the output names above. There is no report.html or
-  reps.csv: the web app draws the report from summary.json (see below).
+* API contract: `pose_app/worker/jobs.py`. The worker codes against the
+  `JobClient` interface (`claim_next`, `progress`, `complete`, `fail`);
+  `HttpJobClient` implements it over HTTP with a shared token. Moving to a
+  message broker later means a second implementation; the worker loop and
+  `run_analysis()` stay as they are.
+* A claimed job names its files by key, a path relative to the media root
+  (e.g. `inputs.video = alice/<uuid>/video.mp4`, `output_dir = alice/<uuid>`).
+  Each side sets its own root, so the web app and the worker can mount the
+  disk in different places. Uploads must not use the output names above.
 * Outputs appear all at once: the worker writes them in a hidden
-  `.analysis-tmp-*` folder inside `job_dir` and moves them in at the end, so a
-  failed or cancelled job leaves nothing behind. The worker needs write access
-  to `job_dir`, and its files must be readable by the web app (same user, or a
-  shared group with a suitable umask).
-* Job options (`options` JSON column): clip start/end, rotation, which
-  athlete to follow, telemetry offset, threshold overrides, no video; see `JOB_OPTIONS` in `pose_app/worker/jobs.py`. The model and hardware
-  are the worker's settings, not per job.
-* While running, the worker writes `progress_stage` (pose, video) and
-  `progress_pct` every few seconds. On success `result` lists the output file
-  names, rep counts and warnings.
-* Failures: `error_kind = 'input'` means the upload can't be analysed and the
-  message can be shown to the user (no retry); `'internal'` is retried up to
-  `WORKER_MAX_ATTEMPTS` times. Setting `status = 'CANCELLED'` stops a running
-  job within a few seconds.
-* Several workers can poll the same table safely (`FOR UPDATE SKIP LOCKED`).
-  If a worker dies, its job is requeued once its heartbeat is
-  `WORKER_STALE_SECONDS` old.
+  `.analysis-tmp-*` folder inside `output_dir` and moves them in at the end,
+  so a failed or cancelled job leaves nothing behind. The worker needs write
+  access to `output_dir`, and its files must be readable by the web app (same
+  user, or a shared group with a suitable umask). The summary is not written
+  there: it is sent as the report, and the web app stores it after checking it.
+* Job options: clip start/end, rotation, which athlete to follow, telemetry
+  offset, threshold overrides, no video; see `JOB_OPTIONS` in
+  `pose_app/worker/jobs.py`. The model and hardware are the worker's
+  settings, not per job.
+* While running, the worker reports `stage` (pose, video) and `progress`
+  every `WORKER_HEARTBEAT_SECONDS`; that is also its heartbeat. The web app
+  requeues a job that stays silent too long (`hyrox.jobs.stale-after`).
+* Failures: an unusable upload is failed with its `code` (see `ERROR_CODES`
+  in `pose_app/analysis/api.py`) and `retryable: false`; the worker's own
+  errors are `retryable: true`, and the web app decides whether to run the
+  job again (`hyrox.jobs.max-attempts`). A `409` answer means the job was
+  cancelled or given to another worker: the worker stops and drops it.
+* If the web app is restarting, calls are retried with backoff for
+  `WORKER_API_RETRY_SECONDS` (60 by default), so the worker does not notice.
+* Several workers can run at once; the web app hands each job to one of them.
 * Other settings (`pose_app/worker/config.py`): `WORKER_MODEL`, `WORKER_IMGSZ`,
-  `WORKER_DEVICE`, `WORKER_POLL_SECONDS`, `WORKER_HEARTBEAT_SECONDS`. In a
+  `WORKER_DEVICE`, `WORKER_POLL_SECONDS`, `WORKER_API_TIMEOUT_SECONDS`. In a
   container, set `PYTHONUNBUFFERED=1` so logs appear immediately.
 
 ### summary.json
@@ -155,10 +162,8 @@ seconds in annotated.mp4 (which starts at the clip start), so the web app can
 seek the player straight to a rep or a fault.
 
 Regression tests (no model needed): `python tests/test_skierg.py`,
-`python tests/test_telemetry.py` and `python tests/test_api.py`.
-`python tests/test_worker.py` needs a MySQL 8 server:
-`WORKER_TEST_DATABASE_URL=mysql://root@127.0.0.1:3306` (it creates the
-`pose_worker_test` database).
+`python tests/test_telemetry.py`, `python tests/test_api.py` and
+`python tests/test_worker.py` (against an in-memory fake of the web app's API).
 
 Real-time webcam pose estimation (Ultralytics YOLO) with a responsive,
 full-screen-capable view: original feed | pose overlay | joint-angle panel.
@@ -199,9 +204,8 @@ full-screen-capable view: original feed | pose overlay | joint-angle panel.
             stations/           one analyzer per station (skierg.py so far)
             telemetry/          machine data: readers, cleaning, sync, fusion
         worker/                 queue worker for the web app
-            schema.sql          analysis_jobs table (the contract with the web app)
-            jobs.py             claim / heartbeat / finish jobs in MySQL
-            worker.py           Worker: one job from claim to outputs in its folder
+            jobs.py             JobClient interface + HttpJobClient (the web app's API)
+            worker.py           Worker: one job from claim to outputs and report
             config.py           WORKER_* environment variables
         ui/
             display.py          window, full screen, drawable size

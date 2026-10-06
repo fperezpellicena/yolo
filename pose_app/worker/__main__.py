@@ -7,7 +7,7 @@ import threading
 from dotenv import find_dotenv, load_dotenv
 
 from .config import WorkerConfig
-from .jobs import JobStore
+from .jobs import HttpJobClient
 from .worker import Worker
 
 
@@ -26,7 +26,7 @@ def main() -> int:
     signal.signal(signal.SIGTERM, request_stop)
     signal.signal(signal.SIGINT, request_stop)
 
-    jobs = JobStore(cfg.database_url)
+    jobs = HttpJobClient(cfg.api_url, cfg.api_token, cfg.api_timeout_s, cfg.api_retry_s)
     try:
         Worker(cfg, jobs).run(stop)
     finally:
