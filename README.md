@@ -85,10 +85,10 @@ other exception is a bug or an environment problem.
 ### Queue worker (for the web app)
 
 The web app saves the uploads in a folder per analysis and inserts a row into
-the `analysis_job` table; the worker analyses the files in place and writes
+the `analysis_jobs` table; the worker analyses the files in place and writes
 its outputs into the same folder:
 
-    analysis_job QUEUED --claim--> run_analysis() on <media root>/<job_dir>/<video_file>
+    analysis_jobs QUEUED --claim--> run_analysis() on <media root>/<job_dir>/<video_file>
         -> summary.json, annotated.mp4, pose_cache.npz written next to it
         -> SUCCEEDED / FAILED
 
@@ -199,7 +199,7 @@ full-screen-capable view: original feed | pose overlay | joint-angle panel.
             stations/           one analyzer per station (skierg.py so far)
             telemetry/          machine data: readers, cleaning, sync, fusion
         worker/                 queue worker for the web app
-            schema.sql          analysis_job table (the contract with the web app)
+            schema.sql          analysis_jobs table (the contract with the web app)
             jobs.py             claim / heartbeat / finish jobs in MySQL
             worker.py           Worker: one job from claim to outputs in its folder
             config.py           WORKER_* environment variables

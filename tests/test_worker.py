@@ -4,7 +4,7 @@ Needs WORKER_TEST_DATABASE_URL, e.g. mysql://root@127.0.0.1:3306 ; the tests
 create and use the database `pose_worker_test`, dropping it first. Skipped
 when the variable is not set. Run: python tests/test_worker.py (or pytest).
 """
-import json, os, shutil, sys, tempfile, threading, time, unittest, uuid
+import json, os, re, shutil, sys, tempfile, threading, time, unittest, uuid
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -38,14 +38,19 @@ def _setup():
         conn = connect(_state["url"])
         with conn.cursor() as cur:
             with open(SCHEMA) as fh:
-                cur.execute(fh.read().strip().rstrip(";"))
+                # One statement per execute; only a line-ending ';' ends one
+                # (comments may contain semicolons).
+                for stmt in re.split(r";\s*$", fh.read(), flags=re.M):
+                    if stmt.strip():
+                        cur.execute(stmt)
         conn.close()
         _state["tmp"] = tempfile.mkdtemp()
         _state["clip"] = os.path.join(_state["tmp"], "clip.mp4")
         write_video(_state["clip"])
     conn = connect(_state["url"])
     with conn.cursor() as cur:
-        cur.execute("TRUNCATE analysis_job")
+        cur.execute("TRUNCATE analysis_jobs")
+        cur.execute("DELETE FROM analyses")         # TRUNCATE is refused on a referenced table
     conn.commit()
     root = os.path.join(_state["tmp"], "media")
     shutil.rmtree(root, ignore_errors=True)
@@ -60,7 +65,10 @@ def _insert(conn, job_dir, video_file="clip.mp4", options=None, **cols) -> int:
     cols = {"station": "skierg", "job_dir": job_dir, "video_file": video_file,
             "options": json.dumps(options) if options is not None else None, **cols}
     with conn.cursor() as cur:
-        cur.execute(f"INSERT INTO analysis_job ({', '.join(cols)}) "
+        if "analysis_id" not in cols:
+            cur.execute("INSERT INTO analyses () VALUES ()")
+            cols["analysis_id"] = cur.lastrowid
+        cur.execute(f"INSERT INTO analysis_jobs ({', '.join(cols)}) "
                     f"VALUES ({', '.join(['%s'] * len(cols))})", list(cols.values()))
         job_id = cur.lastrowid
     conn.commit()
@@ -71,7 +79,7 @@ def _row(conn, job_id):
     conn.commit()                                   # end the snapshot: see other sessions' writes
     with conn.cursor() as cur:
         cur.execute("SELECT status, attempts, error_kind, error_code, error_message, result, "
-                    "worker_id FROM analysis_job WHERE id = %s", (job_id,))
+                    "worker_id FROM analysis_jobs WHERE id = %s", (job_id,))
         status, attempts, kind, code, message, result, worker = cur.fetchone()
     return {"status": status, "attempts": attempts, "error_kind": kind, "error_code": code,
             "error": message,
@@ -187,7 +195,7 @@ class _CancellingEstimator(FakeEstimator):
         if self.i == 100:
             conn = connect(self.url)
             with conn.cursor() as cur:
-                cur.execute("UPDATE analysis_job SET status = 'CANCELLED' WHERE id = %s",
+                cur.execute("UPDATE analysis_jobs SET status = 'CANCELLED' WHERE id = %s",
                             (self.job,))
             conn.commit()
             conn.close()

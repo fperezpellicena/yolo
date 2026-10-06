@@ -11,31 +11,43 @@
 -- job_dir and writes its outputs next to them: summary.json, annotated.mp4 and
 -- pose_cache.npz (inputs must not use these names, nor reps.csv / report.html).
 
-CREATE TABLE analysis_job (
-    id              BIGINT        NOT NULL AUTO_INCREMENT PRIMARY KEY,
-    status          VARCHAR(16)   NOT NULL DEFAULT 'QUEUED',    -- QUEUED, RUNNING, SUCCEEDED, FAILED, CANCELLED
+-- Owned by the web app, which adds its own columns; the worker only relies on
+-- id, through analysis_jobs.analysis_id.
+CREATE TABLE analyses (
+  id              BIGINT        NOT NULL AUTO_INCREMENT,
 
-    -- Written by the web app
-    station         VARCHAR(32)   NOT NULL,            -- e.g. 'skierg'
-    job_dir         VARCHAR(1024) NOT NULL,            -- e.g. 'analysis/{username}/{uuid}'
-    video_file      VARCHAR(255)  NOT NULL,             -- file name in job_dir
-    telemetry_file  VARCHAR(255)  NULL,                 -- machine data CSV in job_dir, if any
-    options         JSON          NULL,                -- see JOB_OPTIONS in pose_app/worker/jobs.py
-    created_at      DATETIME(3)   NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  PRIMARY KEY (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
-    -- Written by the worker
-    attempts        INT           NOT NULL DEFAULT 0,
-    worker_id       VARCHAR(128)  NULL,
-    progress_stage  VARCHAR(16)   NULL,                 -- pose, video
-    progress_pct    TINYINT       NULL,                 -- within the stage; NULL if unknown
-    heartbeat_at    DATETIME(3)   NULL,
-    started_at      DATETIME(3)   NULL,
-    finished_at     DATETIME(3)   NULL,
-    result          JSON          NULL,                 -- on SUCCEEDED, see Worker._result
-    error_kind      VARCHAR(16)   NULL,                 -- 'input': the upload can't be analysed
-                                                        -- 'internal': our fault, retried
-    error_code      VARCHAR(32)   NULL,                 -- 'input' only: see ERROR_CODES in pose_app/analysis/api.py
-    error_message   TEXT          NULL,                 -- details in English, for logs
+CREATE TABLE analysis_jobs (
+  id              BIGINT        NOT NULL AUTO_INCREMENT,
+  analysis_id     BIGINT        NOT NULL,
+  status          VARCHAR(16)   NOT NULL DEFAULT 'QUEUED',
 
-    KEY idx_analysis_job_queue (status, id)
-);
+  -- Written by the web app
+  station         VARCHAR(32)   NOT NULL,                 -- e.g. 'skierg'
+  job_dir         VARCHAR(1024) NOT NULL,                 -- e.g. '{username}/{uuid}'
+  video_file       VARCHAR(255)  NOT NULL,                 -- file name in job_dir
+  telemetry_file   VARCHAR(255)  NULL,                     -- machine data CSV in job_dir, if any
+  options         JSON          NULL,                     -- see JOB_OPTIONS in pose_app/worker/jobs.py
+  created_at      DATETIME(3)   NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+
+  -- Written by the worker
+  attempts        INT           NOT NULL DEFAULT 0,
+  worker_id       VARCHAR(128)  NULL,
+  progress_stage  VARCHAR(16)   NULL,                     -- pose, video
+  progress_pct    TINYINT       NULL,                     -- within the stage; NULL if unknown
+  heartbeat_at    DATETIME(3)   NULL,
+  started_at      DATETIME(3)   NULL,
+  finished_at      DATETIME(3)   NULL,
+  result          JSON          NULL,                     -- on SUCCEEDED, see Worker._result
+  error_kind      VARCHAR(16)   NULL,                     -- 'input': the upload cannot be analysed; 'internal': our fault, retried
+  error_code      VARCHAR(32)   NULL,                     -- 'input' only: see ERROR_CODES in pose_app/analysis/api.py
+  error_message   TEXT          NULL,                     -- details in English, for logs
+
+  PRIMARY KEY (id),
+  KEY ix_analysis_jobs_queue (status, id),
+  KEY ix_analysis_jobs_analysis (analysis_id),
+  CONSTRAINT ck_analysis_jobs_status CHECK (status IN ('QUEUED', 'RUNNING', 'SUCCEEDED', 'FAILED', 'CANCELLED')),
+  CONSTRAINT fk_analysis_jobs_analyses FOREIGN KEY (analysis_id) REFERENCES analyses (id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

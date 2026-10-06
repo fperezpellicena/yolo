@@ -179,7 +179,7 @@ class Worker:
                 "warnings": outcome.warnings}
 
 
-# Converts each JSON value in analysis_job.options to what AnalysisOptions expects.
+# Converts each JSON value in analysis_jobs.options to what AnalysisOptions expects.
 _PARSE = {
     "start": float, "end": float, "telemetry_offset": float,
     "rotate": lambda v: _one_of(int(v), (0, 90, 180, 270)),

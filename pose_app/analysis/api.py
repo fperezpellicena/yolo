@@ -23,8 +23,11 @@ log = logging.getLogger(__name__)
 
 # What run_analysis writes into its output folder ("video", "report" and "reps"
 # unless turned off in the options).
-OUTPUT_FILES = {"pose_cache": "pose_cache.npz", "reps": "reps.csv", "summary": "summary.json",
-                "report": "report.html", "video": "annotated.mp4"}
+OUTPUT_FILES = {"pose_cache": "pose_cache.npz", 
+                "reps": "reps.csv", 
+                "summary": "summary.json",
+                "report": "report.html", 
+                "video": "annotated.mp4"}
 
 # (stage, frames done, frames in the clip or 0 if unknown); stage is "pose" or "video"
 ProgressFn = Callable[[str, int, int], None]

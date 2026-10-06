@@ -8,7 +8,7 @@ from typing import Optional
 @dataclass
 class WorkerConfig:
     database_url: str                       # mysql://user:password@host:3306/database
-    media_root: str                         # folder that analysis_job.job_dir is relative to
+    media_root: str                         # folder that analysis_jobs.job_dir is relative to
     model: str = "yolo11m-pose.pt"
     imgsz: int = 960
     device: Optional[str] = None            # e.g. cpu, 0, mps; None lets Ultralytics pick

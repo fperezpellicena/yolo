@@ -1,4 +1,4 @@
-"""The analysis_job table (schema.sql) used as a queue.
+"""The analysis_jobs table (schema.sql) used as a queue.
 
 Workers claim jobs with SELECT ... FOR UPDATE SKIP LOCKED, so any number of
 them can poll the same table without taking the same job twice. A running job
@@ -13,7 +13,7 @@ from urllib.parse import unquote, urlsplit
 
 import pymysql
 
-# Keys the web app may put in analysis_job.options, all optional. Model and
+# Keys the web app may put in analysis_jobs.options, all optional. Model and
 # hardware settings are the worker's own (see config.py), not per job.
 JOB_OPTIONS = {
     "start": "clip start in seconds",
@@ -72,11 +72,11 @@ class JobStore:
         try:
             with self.conn.cursor() as cur:
                 cur.execute("SELECT id, station, job_dir, video_file, telemetry_file, options, attempts "
-                            "FROM analysis_job WHERE status = 'QUEUED' "
+                            "FROM analysis_jobs WHERE status = 'QUEUED' "
                             "ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED")
                 row = cur.fetchone()
                 if row is not None:
-                    cur.execute("UPDATE analysis_job SET status = 'RUNNING', worker_id = %s, "
+                    cur.execute("UPDATE analysis_jobs SET status = 'RUNNING', worker_id = %s, "
                                 "attempts = attempts + 1, started_at = NOW(3), "
                                 "heartbeat_at = NOW(3), progress_stage = NULL, "
                                 "progress_pct = NULL WHERE id = %s", (worker_id, row[0]))
@@ -94,13 +94,13 @@ class JobStore:
                   pct: Optional[int]) -> bool:
         """Record progress; False if the job is no longer ours (cancelled or reclaimed)."""
         return self._execute(
-            "UPDATE analysis_job SET heartbeat_at = NOW(3), progress_stage = %s, "
+            "UPDATE analysis_jobs SET heartbeat_at = NOW(3), progress_stage = %s, "
             "progress_pct = %s WHERE id = %s AND worker_id = %s AND status = 'RUNNING'",
             (stage, pct, job.id, worker_id)) == 1
 
     def succeed(self, job: Job, worker_id: str, result: Dict[str, Any]) -> bool:
         return self._execute(
-            "UPDATE analysis_job SET status = 'SUCCEEDED', result = %s, progress_stage = NULL, "
+            "UPDATE analysis_jobs SET status = 'SUCCEEDED', result = %s, progress_stage = NULL, "
             "progress_pct = NULL, error_kind = NULL, error_code = NULL, error_message = NULL, "
             "finished_at = NOW(3) WHERE id = %s AND worker_id = %s AND status = 'RUNNING'",
             (json.dumps(result), job.id, worker_id)) == 1
@@ -111,7 +111,7 @@ class JobStore:
         `code` is the AnalysisError code of an 'input' failure, None for 'internal' ones."""
         status = "QUEUED" if retry else "FAILED"
         return self._execute(
-            "UPDATE analysis_job SET status = %s, error_kind = %s, error_code = %s, error_message = %s, "
+            "UPDATE analysis_jobs SET status = %s, error_kind = %s, error_code = %s, error_message = %s, "
             "worker_id = IF(%s = 'QUEUED', NULL, worker_id), progress_stage = NULL, "
             "progress_pct = NULL, finished_at = IF(%s = 'FAILED', NOW(3), NULL) "
             "WHERE id = %s AND worker_id = %s AND status = 'RUNNING'",
@@ -122,12 +122,12 @@ class JobStore:
         stale = ("status = 'RUNNING' AND heartbeat_at < NOW(3) - INTERVAL %s SECOND "
                  "AND attempts {} %s")
         failed = self._execute(
-            "UPDATE analysis_job SET status = 'FAILED', error_kind = 'internal', error_code = NULL, "
+            "UPDATE analysis_jobs SET status = 'FAILED', error_kind = 'internal', error_code = NULL, "
             "error_message = 'The worker stopped responding.', finished_at = NOW(3), "
             "progress_stage = NULL, progress_pct = NULL WHERE " + stale.format(">="),
             (stale_s, max_attempts))
         requeued = self._execute(
-            "UPDATE analysis_job SET status = 'QUEUED', worker_id = NULL, "
+            "UPDATE analysis_jobs SET status = 'QUEUED', worker_id = NULL, "
             "progress_stage = NULL, progress_pct = NULL WHERE " + stale.format("<"),
             (stale_s, max_attempts))
         return failed + requeued
