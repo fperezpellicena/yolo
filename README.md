@@ -134,7 +134,13 @@ in the environment take precedence. `.env` is git-ignored.
   `WORKER_API_RETRY_SECONDS` (60 by default), so the worker does not notice.
 * Several workers can run at once; the web app hands each job to one of them.
 * Other settings (`pose_app/worker/config.py`): `WORKER_MODEL`, `WORKER_IMGSZ`,
-  `WORKER_DEVICE`, `WORKER_POLL_SECONDS`, `WORKER_API_TIMEOUT_SECONDS`. In a
+  `WORKER_DEVICE`, `WORKER_POLL_SECONDS`, `WORKER_API_TIMEOUT_SECONDS`.
+* Logging: `WORKER_LOG_LEVEL` (`INFO` by default) and `WORKER_LOG_FILE`
+  (unset: stderr, which suits a container or systemd). The file rolls over
+  at `WORKER_LOG_MAX_MB` (10) keeping `WORKER_LOG_BACKUPS` (5) old files;
+  give each worker on a machine its own file, as rotation is per process.
+  `WORKER_LOG_FORMAT` and `WORKER_LOG_DATEFMT` override the line and
+  timestamp format. In a
   container, set `PYTHONUNBUFFERED=1` so logs appear immediately.
 
 ### summary.json

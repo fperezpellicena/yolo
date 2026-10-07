@@ -6,16 +6,15 @@ import threading
 
 from dotenv import find_dotenv, load_dotenv
 
-from .config import WorkerConfig
+from .config import LogConfig, WorkerConfig, configure_logging
 from .jobs import HttpJobClient
 from .worker import Worker
 
 
 def main() -> int:
-    logging.basicConfig(level=logging.INFO, filename="worker.log",
-                        format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     # .env in the current folder or a parent; real environment variables win.
     load_dotenv(find_dotenv(usecwd=True))
+    configure_logging(LogConfig.from_env())
     cfg = WorkerConfig.from_env()
     stop = threading.Event()
 
