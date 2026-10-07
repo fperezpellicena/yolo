@@ -120,7 +120,7 @@ in the environment take precedence. `.env` is git-ignored.
   there: it is sent as the report, and the web app stores it after checking it.
 * Job options: clip start/end, rotation, which athlete to follow, telemetry
   offset, threshold overrides, no video; see `JOB_OPTIONS` in
-  `pose_app/worker/jobs.py`. The model and hardware are the worker's
+  `pose_app/worker/options.py`. The model and hardware are the worker's
   settings, not per job.
 * While running, the worker reports `stage` (pose, video) and `progress`
   every `WORKER_HEARTBEAT_SECONDS`; that is also its heartbeat. The web app

@@ -14,9 +14,9 @@ from typing import Any, Dict, Optional, Tuple
 
 from ..analysis.api import (OUTPUT_FILES, AnalysisError, AnalysisOptions, AnalysisOutcome,
                             run_analysis)
-from ..analysis.tracking import SELECT_MODES
 from .config import WorkerConfig
-from .jobs import JOB_OPTIONS, ApiError, Job, JobClient
+from .jobs import ApiError, Job, JobClient
+from .options import build_analysis_options
 
 log = logging.getLogger(__name__)
 
@@ -150,7 +150,7 @@ class Worker:
         half-written file, and a failed or cancelled job leaves nothing behind.
 
         Returns the keys of the outputs, the result and the report (summary.json)."""
-        opts = job_options(job, self.cfg)
+        opts = build_analysis_options(job, self.cfg)
         root = self._media_root()
         out_dir = _resolve(root, job.output_dir, "Output folder")
         if not os.path.isdir(out_dir):
@@ -194,44 +194,6 @@ class Worker:
                 "video": {"duration_s": round(video.duration, 3),
                           "width": video.width, "height": video.height},
                 "warnings": outcome.warnings}
-
-
-# Converts each JSON value in a job's options to what AnalysisOptions expects.
-_PARSE = {
-    "start": float, "end": float, "telemetry_offset": float,
-    "rotate": lambda v: _one_of(int(v), (0, 90, 180, 270)),
-    "athlete": lambda v: _one_of(v, SELECT_MODES),
-    "athlete_point": lambda v: tuple(float(x) for x in v[:2]) if len(v) == 2 else _bad(v),
-    "thresholds": lambda v: {str(k): float(x) for k, x in v.items()},
-    "video": lambda v: v if isinstance(v, bool) else _bad(v),
-}
-assert set(_PARSE) == set(JOB_OPTIONS)
-
-
-def job_options(job: Job, cfg: WorkerConfig) -> AnalysisOptions:
-    unknown = set(job.options) - set(JOB_OPTIONS)
-    if unknown:
-        raise AnalysisError("invalid_job", f"Unknown job options: {sorted(unknown)}.")
-    parsed = {}
-    for key, value in job.options.items():
-        if value is None:
-            continue
-        try:
-            parsed[key] = _PARSE[key](value)
-        except (TypeError, ValueError, AttributeError):
-            raise AnalysisError("invalid_job", f"Invalid job option {key}={value!r}: "
-                                               f"expected {JOB_OPTIONS[key]}.") from None
-    # No report.html or reps.csv: the web app builds its report from the summary.
-    return AnalysisOptions(station=job.station, model=cfg.model, imgsz=cfg.imgsz,
-                           device=cfg.device, report=False, csv=False, **parsed)
-
-
-def _one_of(value, allowed):
-    return value if value in allowed else _bad(value)
-
-
-def _bad(value):
-    raise ValueError(value)
 
 
 def _resolve(root: str, key: str, what: str) -> str:

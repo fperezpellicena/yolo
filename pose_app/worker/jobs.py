@@ -15,7 +15,8 @@ be a second implementation of the same interface.
 409 means the job is no longer ours (cancelled, or given to another worker
 after we went silent): the worker drops it. Progress doubles as the
 heartbeat; the web app requeues a job that stays silent too long, and decides
-whether a failed job is retried.
+whether a failed job is retried. The options a job may carry are listed in
+JOB_OPTIONS, in options.py.
 """
 
 import json
@@ -29,19 +30,6 @@ from tenacity import (Retrying, before_sleep_log, retry_if_exception, stop_after
                       wait_exponential)
 
 log = logging.getLogger(__name__)
-
-# Keys the web app may put in a job's options, all optional. Model and
-# hardware settings are the worker's own (see config.py), not per job.
-JOB_OPTIONS = {
-    "start": "clip start in seconds",
-    "end": "clip end in seconds",
-    "rotate": "0, 90, 180 or 270",
-    "athlete": "'largest' or 'center'",
-    "athlete_point": "[x, y] in pixels: follow the person there in the first frame",
-    "telemetry_offset": "machine seconds at video second 0, if automatic sync fails",
-    "thresholds": "{rule_id: value} overriding the station's defaults",
-    "video": "false to skip the annotated video",
-}
 
 
 @dataclass
