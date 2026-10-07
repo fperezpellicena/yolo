@@ -6,11 +6,11 @@ from typing import Tuple
 import cv2
 import numpy as np
 
-from ..skeleton import Angles
+from ...skeleton import Angles
 from .angle_panel import render_angle_panel
 from .annotations import draw_tile_label
 from .layout import compute_layout
-from .theme import BG
+from ...drawing.theme import BG
 
 VIEW_MODES: Tuple[str, ...] = ("auto", "pose + angles", "pose only")
 

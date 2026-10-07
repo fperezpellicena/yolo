@@ -6,7 +6,7 @@ from typing import Optional, Tuple
 import cv2
 import numpy as np
 
-from .ui.theme import BG
+from ..drawing.theme import BG
 
 
 def letterbox(image: np.ndarray, width: int, height: int) -> np.ndarray:

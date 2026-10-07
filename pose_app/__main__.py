@@ -1,5 +1,5 @@
 """Allows `python -m pose_app`."""
 
-from .cli import main
+from .live.cli import main
 
 raise SystemExit(main())

@@ -5,8 +5,8 @@ from typing import Tuple
 import cv2
 import numpy as np
 
-from .text import darken, text_size, thickness
-from .theme import AA, ACCENT, FONT, TEXT
+from ...drawing.text import darken, text_size, thickness
+from ...drawing.theme import AA, ACCENT, FONT, TEXT
 
 HELP_LINES: Tuple[Tuple[str, str], ...] = (
     ("f", "toggle full screen"),

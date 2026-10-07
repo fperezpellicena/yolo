@@ -1,9 +1,10 @@
 # Pose estimation with joint angles + Hyrox technique analysis
 
-Two tools share one package:
+Three tools share one package, `pose_app`, each in its own subpackage:
 
-* `pose_angles.py`: live webcam pose estimation with joint angles.
-* `hyrox_analyze.py`: offline technique analysis of a recorded station video.
+* `pose_angles.py` (`pose_app/live`): live webcam pose estimation with joint angles.
+* `hyrox_analyze.py` (`pose_app/analysis`): offline technique analysis of a recorded station video.
+* `python -m pose_app.worker` (`pose_app/worker`): runs the analyses queued by the web app.
 
 ## Hyrox technique analysis (recorded video)
 
@@ -175,7 +176,7 @@ Real-time webcam pose estimation (Ultralytics YOLO) with a responsive,
 full-screen-capable view: original feed | pose overlay | joint-angle panel.
 
     pip install -r requirements.txt
-    python pose_angles.py            # or: python -m pose_app
+    python pose_angles.py            # or: python -m pose_app.live (or pose_app)
     python pose_angles.py --help     # all options
 
 ## Project layout
@@ -184,18 +185,30 @@ full-screen-capable view: original feed | pose overlay | joint-angle panel.
     hyrox_analyze.py            offline analysis entry point
     tests/                      synthetic regression tests
     pose_app/
-        cli.py                  parse options, pick the camera, start the app
-        app.py                  PoseApp: main loop + keyboard actions
-        config.py               Settings dataclass (all runtime options)
-        cameras.py              webcam discovery / opening
-        camera_selection.py     interactive camera prompt
-        estimator.py            PoseEstimator: YOLO -> Person records + overlay
-        person.py               Person dataclass
-        skeleton.py             COCO-17 keypoints and ANGLE_DEFS
-        geometry.py             angle maths
-        smoothing.py            AngleSmoother (EMA)
-        fps.py                  FpsMeter
-        recorder.py             Recorder: fixed-size video output
+        estimator.py            shared: PoseEstimator: YOLO -> Person records + overlay
+        person.py               shared: Person dataclass
+        skeleton.py             shared: COCO-17 keypoints and ANGLE_DEFS
+        geometry.py             shared: angle maths
+        drawing/                shared: OpenCV drawing helpers
+            text.py             scalable text + translucent box helpers
+            theme.py            fonts and colours
+        live/                   live webcam app
+            cli.py              parse options, pick the camera, start the app
+            app.py              PoseApp: main loop + keyboard actions
+            config.py           Settings dataclass (all runtime options)
+            cameras.py          webcam discovery / opening
+            camera_selection.py interactive camera prompt
+            smoothing.py        AngleSmoother (EMA)
+            fps.py              FpsMeter
+            recorder.py         Recorder: fixed-size video output
+            ui/
+                display.py      window, full screen, drawable size
+                view.py         ViewState + render_view (composes the screen)
+                layout.py       responsive tile/panel placement
+                angle_panel.py  the angle read-out panel
+                annotations.py  joint-angle labels and tile captions
+                help_overlay.py keyboard shortcut overlay
+                toast.py        transient status messages
         analysis/               offline Hyrox technique analysis
             api.py              run_analysis(): one call per analysis (CLI, workers)
             cli.py              hyrox_analyze.py options
@@ -212,20 +225,11 @@ full-screen-capable view: original feed | pose overlay | joint-angle panel.
         worker/                 queue worker for the web app
             jobs.py             JobClient interface + HttpJobClient (the web app's API)
             worker.py           Worker: one job from claim to outputs and report
+            options.py          JOB_OPTIONS: a job's options -> AnalysisOptions
             config.py           WORKER_* environment variables
-        ui/
-            display.py          window, full screen, drawable size
-            view.py             ViewState + render_view (composes the screen)
-            layout.py           responsive tile/panel placement
-            angle_panel.py      the angle read-out panel
-            annotations.py      joint-angle labels and tile captions
-            help_overlay.py     keyboard shortcut overlay
-            toast.py            transient status messages
-            text.py             scalable text + translucent box helpers
-            theme.py            fonts and colours
 
 ## Common changes
 
 * Track another angle: add a row to `ANGLE_DEFS` in `skeleton.py`.
 * Add a key binding: add a method to `PoseApp` and register it in `_actions`.
-* Restyle: edit `ui/theme.py`.
+* Restyle: edit `drawing/theme.py`.

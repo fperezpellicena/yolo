@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from .skeleton import Angles
+from ..skeleton import Angles
 
 
 class AngleSmoother:

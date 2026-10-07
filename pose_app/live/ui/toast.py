@@ -5,8 +5,8 @@ import time
 import cv2
 import numpy as np
 
-from .text import darken, fit_scale, text_size, thickness
-from .theme import AA, ACCENT, FONT, TEXT
+from ...drawing.text import darken, fit_scale, text_size, thickness
+from ...drawing.theme import AA, ACCENT, FONT, TEXT
 
 
 class Toast:

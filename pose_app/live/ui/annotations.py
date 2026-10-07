@@ -3,11 +3,11 @@
 import cv2
 import numpy as np
 
-from ..person import Person
-from ..skeleton import ANGLE_DEFS, KP
+from ...person import Person
+from ...skeleton import ANGLE_DEFS, KP
 from .layout import Rect
-from .text import darken, fit_scale, text_size, thickness
-from .theme import AA, ACCENT, FONT, TEXT
+from ...drawing.text import darken, fit_scale, text_size, thickness
+from ...drawing.theme import AA, ACCENT, FONT, TEXT
 
 
 def draw_joint_angles(image: np.ndarray, person: Person, min_score: float) -> None:

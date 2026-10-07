@@ -9,10 +9,10 @@ import numpy as np
 
 from .cameras import Camera, open_camera
 from .config import Settings
-from .estimator import PoseEstimator
+from ..estimator import PoseEstimator
 from .fps import FpsMeter
 from .recorder import Recorder
-from .skeleton import empty_angles
+from ..skeleton import empty_angles
 from .smoothing import AngleSmoother
 from .ui.annotations import draw_joint_angles
 from .ui.display import Display

@@ -1,21 +1,20 @@
 """
-Webcam pose estimation with a joint-angle readout.
+Pose estimation (Ultralytics YOLO) for three uses, one subpackage each:
 
-Package layout (one responsibility per module):
+    live/        webcam app with a joint-angle readout     python -m pose_app.live
+    analysis/    offline technique analysis of a video     python -m pose_app.analysis
+    worker/      runs analyses queued by the web app       python -m pose_app.worker
 
-    cli.py               command-line parsing and program start-up
-    app.py               PoseApp: main loop and keyboard controls
-    config.py            Settings: every runtime option in one place
-    cameras.py           webcam discovery and opening
-    camera_selection.py  interactive "which camera?" prompt
+They share the modules at this level, and depend only on them (the worker
+also on analysis/), never on each other:
+
     estimator.py         PoseEstimator: YOLO inference -> Person records
     person.py            Person: one detected body
     skeleton.py          COCO-17 keypoints and the joint-angle definitions
     geometry.py          angle maths
-    smoothing.py         AngleSmoother: jitter reduction
-    fps.py               FpsMeter
-    recorder.py          Recorder: fixed-size video output
-    ui/                  everything that draws pixels or owns the window
+    drawing/             fonts, colours and text helpers for OpenCV frames
+
+`python -m pose_app` starts the webcam app.
 """
 
 import os

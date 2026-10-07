@@ -7,8 +7,8 @@ import cv2
 import numpy as np
 
 from ..skeleton import KP
-from ..ui.text import darken, text_size, thickness
-from ..ui.theme import AA, ACCENT, FONT, TEXT
+from ..drawing.text import darken, text_size, thickness
+from ..drawing.theme import AA, ACCENT, FONT, TEXT
 from .pipeline import AnalysisResult
 from .video import VideoReader
 

@@ -3,9 +3,9 @@
 import cv2
 import numpy as np
 
-from ..skeleton import ANGLE_LABELS, Angles
-from .text import fit_scale, text_size, thickness
-from .theme import AA, ACCENT, DIM, DIVIDER, FONT, MUTED, PANEL_BG, TEXT, TRACK
+from ...skeleton import ANGLE_LABELS, Angles
+from ...drawing.text import fit_scale, text_size, thickness
+from ...drawing.theme import AA, ACCENT, DIM, DIVIDER, FONT, MUTED, PANEL_BG, TEXT, TRACK
 
 
 def render_angle_panel(w: int, h: int, n_people: int, angles: Angles,
