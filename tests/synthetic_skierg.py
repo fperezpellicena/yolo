@@ -6,7 +6,6 @@ from pose_app.skeleton import KP
 from pose_app.analysis.render import EDGES
 
 FPS, W, H = 30, 960, 720
-rng = np.random.default_rng(0)
 
 def interp(th, keys):  # keys: list of (phase, value); smooth piecewise cosine
     for (p0, v0), (p1, v1) in zip(keys, keys[1:]):
@@ -73,12 +72,15 @@ def write_video(path):
     vw.release()
 
 class FakeEstimator:
-    """Returns the synthetic athlete (noisy, with dropouts) plus a bystander."""
-    def __init__(self): self.i = 0
+    """Returns the synthetic athlete (noisy, with dropouts) plus a bystander.
+
+    Each instance has its own seeded noise, so a run gives the same result
+    whatever ran before it."""
+    def __init__(self, seed=0): self.i = 0; self.rng = np.random.default_rng(seed)
     def detect(self, frame):
         kp, sc = FRAMES[min(self.i, len(FRAMES) - 1)]; self.i += 1
-        kp = kp + rng.normal(0, 2.0, kp.shape); sc = sc.copy()
-        if rng.random() < 0.03: sc[:] = 0.1          # missed detection
+        kp = kp + self.rng.normal(0, 2.0, kp.shape); sc = sc.copy()
+        if self.rng.random() < 0.03: sc[:] = 0.1     # missed detection
         box = np.array([*kp.min(0) - 20, *kp.max(0) + 20])
         by = kp * 0.5 + [650, 330]                    # small person in background
         people = [Person(box, kp, sc), Person(np.array([*by.min(0), *by.max(0)]), by, np.full(17, .9))]

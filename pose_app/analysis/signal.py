@@ -59,12 +59,16 @@ def find_cycles(y: np.ndarray, t: np.ndarray, lo: float, hi: float,
     """Peak -> trough -> peak cycles using hysteresis (robust to jitter).
 
     A peak is the maximum of a stretch that rose above `hi`, a trough the
-    minimum of a stretch that fell below `lo`. Missing data breaks a cycle.
+    minimum of a stretch that fell below `lo`. Missing data breaks a cycle,
+    except at the end, where it counts as the clip ending (a missed detection
+    in the last frames must not cost the final rep).
     The same state machine can later run live on a webcam stream.
     """
     extrema: List[Tuple[str, int]] = []
     state, best = None, -1
-    for i, v in enumerate(y):
+    measured = np.flatnonzero(~np.isnan(y))
+    end = measured[-1] + 1 if measured.size else 0
+    for i, v in enumerate(y[:end]):
         if np.isnan(v):
             if state is not None:
                 extrema.append(("break", i))
