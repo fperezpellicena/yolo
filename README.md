@@ -27,6 +27,11 @@ Tuning thresholds with a coach (no re-running the model):
     # edit ski.json
     python hyrox_analyze.py clip.mp4 --station skierg --thresholds ski.json --reuse --no-video
 
+The cache records what the pose pass depended on (the video, clip, rotation,
+athlete choice and model settings). `--reuse` takes the output folder's cache
+whatever model made it, but runs the pass again if the clip or the athlete
+choice changed.
+
 ### Adding machine data (SkiErg / rower)
 
 Record the piece with Track My Indoor Workout (FTMS) at the same time as the
@@ -196,6 +201,11 @@ uploads and the worker writes its outputs next to them:
     POST /internal/jobs/claim --> run_analysis() on <media root>/<inputs.video>
         -> annotated.mp4, pose_cache.npz written in <media root>/<output_dir>
         -> POST /internal/jobs/{id}/complete with the report (summary.json) / .../fail
+
+A job run again on the same uploads, as when the athlete adds the force
+analysis' setup, reuses the last run's pose_cache.npz if the video, clip,
+rotation, athlete choice and the worker's model settings are the same, so it
+skips straight to the analysis and the annotated video.
 
     pip install -r requirements-worker.txt
     export WORKER_API_URL=http://web:8081      # the web app's internal API port

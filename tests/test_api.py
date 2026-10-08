@@ -75,6 +75,42 @@ def test_run_analysis_with_telemetry():
         assert outcome.result.machine is not None
 
 
+class _NoDetector:
+    """Fails the test if the pose pass runs."""
+    def detect(self, frame):
+        raise AssertionError("the pose pass ran again")
+
+
+def test_a_previous_pose_pass_is_reused_only_with_the_same_settings():
+    with tempfile.TemporaryDirectory() as d:
+        video = os.path.join(d, "ski.mp4")
+        write_video(video)
+        quiet = dict(model="fake", video=False, report=False, csv=False)
+        first = run_analysis(video, os.path.join(d, "first"), AnalysisOptions(**quiet),
+                             FakeEstimator())
+        cache = first.files["pose_cache"]
+        # The same video, clip and model: no pose pass, and the cache is in the new folder too
+        again = run_analysis(video, os.path.join(d, "again"),
+                             AnalysisOptions(**quiet, pose_cache=cache,
+                                             thresholds={"early_arm_pull": 0.2}), _NoDetector())
+        assert len(again.result.reps) == len(first.result.reps)
+        assert os.path.exists(again.files["pose_cache"])
+        # Another clip, athlete choice or model: the pose pass runs again
+        for changed in (dict(start=1.0), dict(athlete="center"), dict(model="other")):
+            detector = FakeEstimator()
+            run_analysis(video, os.path.join(d, "changed"),
+                         AnalysisOptions(**{**quiet, **changed}, pose_cache=cache), detector)
+            assert detector.i > 0, changed
+        # --reuse takes its own folder's cache whatever model made it, but not another clip
+        reused = run_analysis(video, os.path.join(d, "first"),
+                              AnalysisOptions(**{**quiet, "model": "other"}, reuse=True), _NoDetector())
+        assert len(reused.result.reps) == len(first.result.reps)
+        detector = FakeEstimator()
+        run_analysis(video, os.path.join(d, "first"), AnalysisOptions(**quiet, reuse=True, end=20.0),
+                     detector)
+        assert detector.i > 0
+
+
 def test_bad_inputs_raise_analysis_error():
     with tempfile.TemporaryDirectory() as d:
         video = os.path.join(d, "ski.mp4")

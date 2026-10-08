@@ -160,6 +160,9 @@ class Worker:
             opts.telemetry = _input(root, job.telemetry)
         if job.pm5:
             opts.pm5 = _input(root, job.pm5)
+        # A job run again on the same uploads, as when the athlete adds the force analysis'
+        # setup, reuses the last run's pose pass if nothing it depends on changed
+        opts.pose_cache = os.path.join(out_dir, OUTPUT_FILES["pose_cache"])
         for old in glob.glob(os.path.join(out_dir, SCRATCH_PREFIX + "*")):
             shutil.rmtree(old, ignore_errors=True)      # left by a worker that died
         work = tempfile.mkdtemp(prefix=SCRATCH_PREFIX, dir=out_dir)
