@@ -92,6 +92,9 @@ What it adds:
   body's centre of mass; "cord 312 N  body weight 41%" in the header.
 * report.html: a "Force analysis" section (averages, the mean force curve early
   and late in the piece, a peak-force frame, data checks) and force charts.
+  A PM5 log alone, without the setup, already gives a "PM5 force curves"
+  section (every stroke's curve over the piece's mean) and, in summary.json,
+  every stroke with its curve placed on the video (`pm5`, below).
 * per stroke (`f_*` columns in reps.csv and `per_rep` in summary.json):
 
   | Key | Meaning |
@@ -275,6 +278,20 @@ Everything the report shows, for the web app to draw its own
   `curve` (mean force in N over the drive: `x` 0-1 with `all`, `early` and
   `late`), `reported_joints`, an `example` peak-force frame and `checks`.
   Force rules and charts appear in `rules` and `charts` only when it ran.
+* `pm5` (null without a PM5 log; no calibration needed): every stroke the PM5
+  logged, so a page can show each stroke's force curve. `curve_spacing` (time or
+  travel), `curves` (strokes with one), `sync` (method, confidence, offset,
+  `matched`, `events` hands or cord, and `linked`: whether strokes carry video
+  times), `mean_curve` (as `force.curve`, over the whole log) and `notes`.
+  Each of `strokes` has `n` (1-based, whole log), `piece`, `count` (the PM5's
+  stroke number in the piece), `rep` (the video rep it was matched to, or
+  null), `t_start` / `t_end` (the PM5's drive on the uploaded video's clock,
+  null unless `linked`; within about 0.1 s on the synthetic test sessions),
+  `distance_m`, `drive_time_s`, `drive_length_m`,
+  `recovery_time_s`, `peak_n`, `avg_n`, `work_j`, `power_w`, and `curve`: the
+  force in whole N from the first force to the release, padded with a zero at
+  each end and evenly spaced by `spacing` (null when the curve was lost),
+  with `peak_pct`, where along it the force peaks (0-100).
 
 Times: `t` / `t_start` are seconds in the uploaded video; `video_t*` are
 seconds in annotated.mp4 (which starts at the clip start), so the web app can

@@ -125,6 +125,12 @@ def test_joint_work_balances_the_energy_exactly_on_exact_motion():
     assert max(errors) < 0.1, errors                                  # percent of the stroke's work
 
 
+def test_a_hand_set_offset_only_steers_the_log_it_belongs_to():
+    from pose_app.analysis.pipeline import _sync_prior
+    assert _sync_prior(None, 5.0, same_clock=True) == (5.0, 1.0)
+    assert _sync_prior(None, 5.0, same_clock=False) == (None, 0.0)     # another file's offset
+
+
 def test_matching_tells_neighbouring_strokes_apart():
     rng = np.random.default_rng(3)
     periods = 1.5 * (1 + 0.04 * rng.standard_normal(40))
@@ -192,6 +198,7 @@ def test_force_analysis_recovers_the_truth_time_curves():
     assert {"low_bodyweight_share", "shallow_cord"} <= {r["id"] for r in s["rules"]}
     assert "f_bw_share" in {c["metric"] for c in s["charts"]}
     assert f["example"]["rep"] >= 1 and f["example"]["video_t"] is not None
+    assert s["pm5"]["sync"]["events"] == "cord" and s["pm5"]["sync"]["linked"]
     with open(outcome.files["reps"]) as fh:
         header = next(csv.reader(fh))
     assert "f_peak_n" in header and "frame_force_peak" not in header
@@ -251,10 +258,15 @@ def test_a_log_of_another_piece_leaves_force_out():
     other = sf.Session(n_strokes=24, seed=5, pattern=(7.0, 3.1, 2.5))
     path = os.path.join(_state["dir"], "other.pm5.jsonl")
     other.write_pm5_log(path)
-    res = _run(session.setup(), path, out="other").result
+    outcome = _run(session.setup(), path, out="other")
+    res = outcome.result
     assert not res.force.sync.ok and not res.force.strokes
     assert all(math.isnan(r.metrics["f_bw_share"]) for r in res.reps)
     assert any("could not be matched" in w for w in res.warnings), res.warnings
+    with open(outcome.files["summary"]) as fh:        # the curves stay, off the video
+        p = json.load(fh)["pm5"]
+    assert not p["sync"]["linked"] and p["curves"] == 23
+    assert all(x["t_start"] is None and x["rep"] is None for x in p["strokes"])
 
 
 def test_pm5_log_without_setup_syncs_the_machine_data():
@@ -264,6 +276,38 @@ def test_pm5_log_without_setup_syncs_the_machine_data():
     assert abs(res.machine.alignment.offset - (sf.LOG_OFFSET - 0.2)) < 0.1
     assert any("force analysis was skipped" in w for w in res.warnings)
     assert all("f_bw_share" not in r.metrics for r in res.reps)
+
+
+def test_every_pm5_stroke_and_its_curve_go_in_the_summary():
+    session, _, log, _ = _inputs()
+    outcome = _run(None, log, out="plain")
+    with open(outcome.files["summary"]) as fh:
+        s = json.load(fh)
+    p = s["pm5"]
+    assert p["curve_spacing"] == "time" and p["curves"] == 23
+    assert p["sync"]["linked"] and p["sync"]["events"] == "hands" and p["sync"]["matched"] >= 20
+    strokes = p["strokes"]
+    assert [x["n"] for x in strokes] == list(range(1, 25))
+    assert strokes[8]["curve"] is None and strokes[8]["peak_n"] > 0     # a curve packet was lost
+    reps = {r["n"]: r for r in s["per_rep"]}
+    matched = [x for x in strokes if x["rep"] is not None]
+    assert len(matched) == p["sync"]["matched"]
+    assert all(a["rep"] < b["rep"] for a, b in zip(matched, matched[1:]))
+    for x, truth in zip(strokes, session.strokes):
+        assert abs(x["t_start"] - truth["t_start"]) < 0.12, (x, truth["t_start"])
+        assert abs(x["t_end"] - truth["t_end"]) < 0.12, (x, truth["t_end"])
+        if x["rep"] is not None:
+            assert abs(reps[x["rep"]]["t_start"] - truth["t_start"]) < 0.2
+        if x["curve"] is not None:
+            c = x["curve"]
+            assert c[0] == c[-1] == 0 and all(isinstance(v, int) for v in c)
+            assert abs(max(c) - x["peak_n"]) < 5      # whole lbf on the curve, 0.1 lbf per stroke
+            assert 20 < x["peak_pct"] < 60
+    m = p["mean_curve"]
+    assert len(m["x"]) == len(m["all"]) == len(m["early"]) == len(m["late"]) == 51
+    with open(outcome.files["report"], encoding="utf-8") as fh:
+        html = fh.read()
+    assert "PM5 force curves" in html and html.count('class="stroke"') == 23
 
 
 def test_force_options_are_checked():

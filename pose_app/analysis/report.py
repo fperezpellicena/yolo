@@ -6,13 +6,15 @@ import html
 import json
 import math
 from collections import Counter
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
 
 from .force import FORCE_CHARTS
+from .force.analysis import mean_curves
 from .force.model import REPORTED_JOINTS
+from .force.sync import curve_profile
 from .pipeline import AnalysisResult, RepResult
 from .render import snapshot
 from .rules import Fault
@@ -115,6 +117,7 @@ def summary_dict(res: AnalysisResult) -> Dict:
         "warnings": res.warnings,
         "machine": _machine_dict(res),
         "force": _force_dict(res, clock),
+        "pm5": _pm5_dict(res),
     }
 
 
@@ -179,6 +182,52 @@ def _force_dict(res: AnalysisResult, clock) -> Optional[Dict]:
         "reported_joints": list(REPORTED_JOINTS),
         "example": ex,
         "checks": fa.checks,
+    }
+
+
+def _pm5_dict(res: AnalysisResult) -> Optional[Dict]:
+    """Every stroke the PM5 logged, with its force curve. Strokes are placed on the video
+    (`t_start` / `t_end`, seconds in the source video) only when the log's strokes were
+    matched to the video's one by one; `rep` is the video rep a stroke was matched to."""
+    pm5, sync = res.pm5, res.pm5_sync
+    if pm5 is None:
+        return None
+    linked = sync is not None and sync.ok
+    rep_of = {p: w + 1 for w, p in sync.pairs.items()} if linked else {}
+    spacing = pm5.curve_basis
+    strokes, profiles = [], []
+    for k, s in enumerate(pm5.strokes):
+        prof = curve_profile(s.curve_n) if s.curve_n is not None else None
+        if prof is not None and s.curve_basis == spacing:
+            profiles.append(prof)
+        strokes.append({
+            "n": k + 1, "piece": s.piece + 1, "count": s.count, "rep": rep_of.get(k),
+            "t_start": _num(s.t_start - sync.offset) if linked else None,
+            "t_end": _num(s.t_end - sync.offset) if linked else None,
+            "distance_m": _num(s.distance_m), "drive_time_s": _num(s.drive_time_s),
+            "drive_length_m": _num(s.drive_length_m), "recovery_time_s": _num(s.recovery_time_s),
+            "peak_n": _num(s.peak_force_n), "avg_n": _num(s.avg_force_n),
+            "work_j": _num(s.work_j), "power_w": _num(s.power_w),
+            "spacing": s.curve_basis if prof is not None else None,
+            "peak_pct": (_num(100.0 * int(np.argmax(prof)) / (len(prof) - 1))
+                         if prof is not None else None),
+            "curve": [int(round(float(v))) for v in prof] if prof is not None else None,
+        })
+    sync_d = None
+    if sync is not None:
+        sync_d = {"method": sync.method, "confidence": sync.confidence,
+                  "offset_s": _num(sync.offset), "matched": len(sync.pairs),
+                  "residual_s": _num(sync.residual_s), "events": sync.events,
+                  "linked": linked, "notes": sync.notes}
+    return {
+        "source": pm5.source,
+        "device": {k: str(v) for k, v in pm5.device.items()},
+        "curves": pm5.curves,
+        "curve_spacing": spacing,
+        "sync": sync_d,
+        "mean_curve": mean_curves(profiles) or None,
+        "strokes": strokes,
+        "notes": pm5.notes,
     }
 
 
@@ -280,6 +329,7 @@ h3{font-size:15px;margin:22px 0 6px}.cover{fill:var(--acc);opacity:.08}
 .tick{stroke-width:2}.major-t{stroke:var(--bad)}.minor-t{stroke:var(--warn)}
 .series.early{stroke:var(--mut);stroke-dasharray:6 4}.series.late{stroke:var(--warn)}
 .all-t{fill:var(--acc)}.early-t{fill:var(--mut)}.late-t{fill:var(--warn)}
+.stroke{fill:none;stroke:var(--fg);stroke-width:1;opacity:.12}
 """
 
 
@@ -393,15 +443,16 @@ fault (red major, orange minor).</p>{_timeline_svg(res)}
 <h3>Machine data quality</h3><ul>{quality}</ul>"""
 
 
-def _curve_svg(curves: Dict[str, List[float]]) -> str:
-    """Mean force curve over the drive; early and late thirds when the piece is long enough."""
+def _curve_svg(curves: Dict[str, List[float]], strokes: Sequence[List[float]] = ()) -> str:
+    """Mean force curve over the drive; early and late thirds when the piece is long enough.
+    `strokes`: single strokes' curves, drawn faintly underneath."""
     if not curves:
         return ""
     x = curves["x"]
     series = [("all", "series", "all strokes")]
     if "early" in curves:
         series += [("early", "series early", "first third"), ("late", "series late", "last third")]
-    top = max(max(curves[k]) for k, _, _ in series)
+    top = max([max(curves[k]) for k, _, _ in series] + [max(c) for c in strokes])
     hi = max(100.0, math.ceil(top * 1.05 / 100.0) * 100.0)
     W, H, L, R, T, B = 640, 220, 44, 12, 12, 34
     sx = lambda v: L + v * (W - L - R)
@@ -411,6 +462,10 @@ def _curve_svg(curves: Dict[str, List[float]]) -> str:
         v = frac * hi
         parts.append(f'<line class="grid" x1="{L}" x2="{W-R}" y1="{sy(v):.1f}" y2="{sy(v):.1f}"/>'
                      f'<text class="ax" x="{L-6}" y="{sy(v)+4:.1f}" text-anchor="end">{v:.0f}</text>')
+    for c in strokes:
+        d = " ".join(f"{'M' if i == 0 else 'L'}{sx(i / (len(c) - 1)):.1f},{sy(v):.1f}"
+                     for i, v in enumerate(c))
+        parts.append(f'<path class="stroke" d="{d}"/>')
     legend = []
     for key, cls, label in series:
         d = " ".join(f"{'M' if i == 0 else 'L'}{sx(a):.1f},{sy(b):.1f}"
@@ -422,6 +477,28 @@ def _curve_svg(curves: Dict[str, List[float]]) -> str:
                  f'<text class="ax" x="{(W + L) / 2:.0f}" y="{H-6}" text-anchor="middle">'
                  f'{" ".join(legend)}</text></svg>')
     return "".join(parts)
+
+
+def _pm5_html(res: AnalysisResult) -> str:
+    """Every stroke's PM5 force curve, faint, under the piece's mean curves."""
+    d = _pm5_dict(res)
+    if d is None:
+        return ""
+    esc, rw = html.escape, res.station.rep_word
+    sync = d["sync"]
+    if sync is not None and sync["linked"]:
+        matched = sum(1 for s in d["strokes"] if s["rep"] is not None)
+        where = f"{matched} of its strokes matched to {rw}s in the video, one by one."
+    else:
+        where = "Its strokes could not be matched to the video one by one, so they stand alone."
+    head = f'<h2>PM5 force curves</h2><p class="mut">{esc(res.pm5.describe())}. {where}</p>'
+    curves = [s["curve"] for s in d["strokes"] if s["curve"] and s["spacing"] == d["curve_spacing"]]
+    if not curves:
+        return head + "<ul>" + "".join(f"<li>{esc(n)}</li>" for n in d["notes"]) + "</ul>"
+    basis = "handle travel" if d["curve_spacing"] == "travel" else "time"
+    return (head + f'<p class="mut">Force on the handles in every stroke (faint) and the mean '
+            f'of the piece, from the first force to the release, spaced by {basis}.</p>'
+            + _curve_svg(d["mean_curve"], curves))
 
 
 def _force_html(res: AnalysisResult, reader: Optional[VideoReader]) -> str:
@@ -516,6 +593,7 @@ def write_html(res: AnalysisResult, path: str, reader: Optional[VideoReader] = N
 <h2>Fatigue: first third vs last third</h2><div class="scroll"><table>
 <tr><th>Check</th><th>Early &rarr; late</th><th>Flagged</th><th>Cue</th></tr>{drift_rows}</table></div>
 {_machine_html(res)}
+{_pm5_html(res)}
 {_force_html(res, reader)}
 <h2>Examples</h2><div class="cards">{_examples(res, reader)}</div>
 <h2>Per-{rep_word} trends</h2><p class="mut">Red points broke a rule; dashed lines are the thresholds.</p>{charts}

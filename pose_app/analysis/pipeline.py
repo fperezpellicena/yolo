@@ -6,6 +6,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 import numpy as np
 
 from ..person import Person
+from ..pm5 import Pm5Session
 from .body import BodySeries, build_body_series
 from .force import (ForceAnalysis, ForceSetup, StrokeSync, analyze_force, attach_force,
                     force_drift_rules, force_rules, sync_by_hands)
@@ -108,6 +109,8 @@ class AnalysisResult:
     fps: float = 0.0                # source video; also the annotated video's frame rate
     force: Optional[ForceAnalysis] = None           # set when a PM5 log and a force setup were given
     rules: List[Rule] = field(default_factory=list) # the rules applied (after overrides)
+    pm5: Optional[Pm5Session] = None                # the PM5 log, when one was given
+    pm5_sync: Optional[StrokeSync] = None           # its strokes matched to the video's, one by one
 
     def rule_list(self) -> List[Rule]:
         """Every per-rep rule that was checked, with its applied threshold."""
@@ -150,7 +153,7 @@ def analyze(ex: Extraction, station: Station, min_score: float = 0.5,
         from_rest = _starts_from_rest(driver, body.t, cycles)
         alignment = align(telemetry, starts, durations, from_rest, telemetry_offset)
 
-    force = None
+    force, sync = None, None
     if pm5 is not None:
         prior, window = _sync_prior(alignment, telemetry_offset, from_pm5)
         if force_setup is not None and station.force:
@@ -178,7 +181,7 @@ def analyze(ex: Extraction, station: Station, min_score: float = 0.5,
 
     thresholds = {r.id: r.threshold for r in (*rules, *drift_rules)}
     result = AnalysisResult(station, body, reps, drift, thresholds, fps=ex.fps, force=force,
-                            rules=rules)
+                            rules=rules, pm5=pm5, pm5_sync=sync)
     if telemetry is not None:
         result.machine = analyze_machine(telemetry, alignment, reps, rules)
     result.warnings = _warnings(result)
@@ -191,10 +194,13 @@ def analyze(ex: Extraction, station: Station, min_score: float = 0.5,
 def _sync_prior(alignment: Optional[Alignment], manual: Optional[float],
                 same_clock: bool) -> Tuple[Optional[float], float]:
     """Where to look for the stroke-by-stroke offset: around a hand-set offset, around the
-    coarse sync of the same log, or everywhere."""
+    coarse sync of the same log, or everywhere. Both are on the PM5 log's clock only when
+    the log is the machine data (`same_clock`); another file's offset says nothing about it."""
+    if not same_clock:
+        return None, 0.0
     if manual is not None:
         return float(manual), 1.0
-    if same_clock and alignment is not None and alignment.ok:
+    if alignment is not None and alignment.ok:
         return float(alignment.offset), 3.0
     return None, 0.0
 

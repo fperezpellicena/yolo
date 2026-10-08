@@ -258,8 +258,14 @@ def _summary(fa: ForceAnalysis, video_strokes: int) -> Dict[str, float]:
 
 
 def _mean_curves(strokes: List[ForceStroke]) -> Dict[str, List[float]]:
-    rows = [np.interp(CURVE_GRID, np.linspace(0, 1, len(s.profile)), s.profile)
-            for s in strokes if s.profile is not None]
+    return mean_curves([s.profile for s in strokes if s.profile is not None])
+
+
+def mean_curves(profiles: Sequence[np.ndarray]) -> Dict[str, List[float]]:
+    """Mean force curve (N) on CURVE_GRID, 0-1 of the way along the drive: over all
+    curves, and over the first and last thirds when there are 6 or more. {} without curves.
+    `profiles` are in time order, each from the first force to the release (curve_profile)."""
+    rows = [np.interp(CURVE_GRID, np.linspace(0, 1, len(p)), p) for p in profiles]
     if not rows:
         return {}
     rows = np.array(rows)

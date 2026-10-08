@@ -223,6 +223,7 @@ def test_force_job_reads_the_pm5_log_and_reports_the_force():
     assert report["force"]["sync"]["confidence"] == "high", report["force"]["sync"]
     assert report["force"]["summary"]["strokes_with_curve"] >= 8
     assert report["machine"]["sync"]["method"] == "strokes"
+    assert len(report["pm5"]["strokes"]) == 12 and report["pm5"]["curves"] == 11
     bad = api.queue(f"{folder}/ski.mp4", folder, options={"force": session.setup().to_dict()})
     assert _run_once(cfg, session.estimator())
     outcome = api.jobs[bad]["outcome"]
