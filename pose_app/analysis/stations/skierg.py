@@ -27,6 +27,7 @@ class SkiErg(Station):
     driver = "wrist_h"
     min_rep_s, max_rep_s = 0.7, 5.0
     phases = ("drive", "recovery")
+    force = True
     filming_tips = (
         "Film side-on, camera square to the athlete, at roughly hip height, 3-4 m away.",
         "Keep the whole body and the handles at full reach overhead in frame.",

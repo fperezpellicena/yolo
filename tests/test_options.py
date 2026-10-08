@@ -51,6 +51,25 @@ def test_null_options_keep_the_defaults():
     assert opts.video is True
 
 
+FORCE = {"athlete": {"mass_kg": 80, "height_m": 1.8, "sex": "male"},
+         "calibration": {"cord_exit": [612, 88],
+                         "scale": {"points": [[400, 900], [400, 600]], "length_m": 1.0}}}
+
+
+def test_force_setup_is_parsed():
+    opts = _options(force=FORCE)
+    assert opts.force.athlete.mass_kg == 80.0 and opts.force.calibration.cord_exit == (612.0, 88.0)
+    assert opts.force.calibration.stick_px_per_m == 300.0
+
+
+def test_invalid_force_setups_are_rejected_with_the_reason():
+    exc = _rejected(force={**FORCE, "athlete": {"mass_kg": 80, "height_m": 180}})
+    assert "metres, not cm" in str(exc), exc
+    for value in [[], "80kg", {"athlete": FORCE["athlete"]},
+                  {**FORCE, "calibration": {"cord_exit": [612, 88], "scale": [1, 2]}}]:
+        _rejected(force=value)
+
+
 def test_unknown_options_are_rejected():
     exc = _rejected(start=2, speed=2, model="other.pt")
     assert "['model', 'speed']" in str(exc)

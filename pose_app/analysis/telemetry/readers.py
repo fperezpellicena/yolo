@@ -21,10 +21,50 @@ def load_telemetry(path: str) -> Telemetry:
                          "from Track My Indoor Workout.")
     with open(path, encoding="utf-8-sig", errors="replace") as fh:
         head = fh.read(4096)
+    if head.lstrip().startswith("{"):
+        from ...pm5 import load_pm5_session
+        return pm5_telemetry(load_pm5_session(path))
     if head.startswith("TMIW") or "RIDE DATA" in head:
         return read_tmiw_csv(path)
     raise ValueError(f"{path}: unrecognised telemetry CSV (expected a Track My Indoor "
-                     "Workout export with 'RIDE SUMMARY' / 'RIDE DATA' sections).")
+                     "Workout export with 'RIDE SUMMARY' / 'RIDE DATA' sections, or a PM5 log).")
+
+
+def pm5_telemetry(session) -> Telemetry:
+    """Machine telemetry from a decoded PM5 log (pose_app.pm5.Pm5Session).
+
+    Times stay on the log's clock (seconds since its first notification), the
+    clock its strokes are timed on too. Power is the PM5's per-stroke power,
+    held until the next stroke.
+    """
+    s = session.status
+    from_status = len(s.status_t) >= 2
+    t = np.sort(s.status_t if from_status else s.distance_t)
+    if len(t) < 2:
+        raise ValueError(f"{session.source}: fewer than two status samples")
+
+    def held(src_t: np.ndarray, src_v: np.ndarray, max_age: float) -> np.ndarray:
+        out = np.full(len(t), np.nan)
+        if not len(src_t):
+            return out
+        order = np.argsort(src_t, kind="stable")
+        src_t, src_v = src_t[order], src_v[order]
+        idx = np.searchsorted(src_t, t, side="right") - 1
+        ok = idx >= 0
+        idx = np.clip(idx, 0, len(src_t) - 1)
+        ok &= t - src_t[idx] <= max_age
+        out[ok] = src_v[idx[ok]]
+        return out
+
+    notes = [n for n in session.notes if not n.endswith("strokes logged.")]
+    if not len(s.status_t):
+        notes.append("No speed, stroke-rate or heart-rate samples in the PM5 log.")
+    meta = {k: str(v) for k, v in session.device.items()}
+    return Telemetry(
+        source=session.source, t0_ms=session.t0 * 1000.0, t=t,
+        power=held(s.power_t, s.power_w, 6.0), spm=held(s.status_t, s.spm, 2.5),
+        distance=held(s.distance_t, s.distance_m, 2.5), speed=held(s.status_t, s.speed_mps, 2.5),
+        hr=held(s.status_t, s.hr, 2.5), meta=meta, notes=notes)
 
 
 def read_tmiw_csv(path: str) -> Telemetry:

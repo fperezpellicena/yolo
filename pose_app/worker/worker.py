@@ -158,6 +158,8 @@ class Worker:
         video = _input(root, job.video)
         if job.telemetry:
             opts.telemetry = _input(root, job.telemetry)
+        if job.pm5:
+            opts.pm5 = _input(root, job.pm5)
         for old in glob.glob(os.path.join(out_dir, SCRATCH_PREFIX + "*")):
             shutil.rmtree(old, ignore_errors=True)      # left by a worker that died
         work = tempfile.mkdtemp(prefix=SCRATCH_PREFIX, dir=out_dir)

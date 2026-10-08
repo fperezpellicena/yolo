@@ -30,6 +30,7 @@ def check_summary(s):
         assert rep["video_t_start"] <= e["video_t"] <= rep["video_t_end"], e
         assert abs(e["t"] - e["video_t"]) < 0.05          # constant frame rate clip from 0 s
     assert all(isinstance(f["value"], float) for r in s["per_rep"] for f in r["faults"])
+    assert s["pm5"] is None and s["force"] is None          # no PM5 log given
 
 
 def test_run_analysis_writes_everything():

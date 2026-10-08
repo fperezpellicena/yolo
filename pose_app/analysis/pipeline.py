@@ -1,17 +1,20 @@
 """Pass 1 (pose extraction, cacheable) and the analysis that runs on it."""
 
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
 from ..person import Person
+from ..pm5 import Pm5Session
 from .body import BodySeries, build_body_series
-from .rules import Drift, Fault, apply_overrides, evaluate_drift
+from .force import (ForceAnalysis, ForceSetup, StrokeSync, analyze_force, attach_force,
+                    force_drift_rules, force_rules, sync_by_hands)
+from .rules import Drift, Fault, Rule, apply_overrides, evaluate_drift
 from .signal import Cycle, find_cycles, hysteresis_thresholds
 from .stations import Station
-from .telemetry import (MachineAnalysis, Telemetry, align, analyze_machine, attach,
-                        machine_drift_rules)
+from .telemetry import (Alignment, MachineAnalysis, Telemetry, align, analyze_machine, attach,
+                        clean, machine_drift_rules, pm5_telemetry)
 from .tracking import AthleteTracker
 from .video import VideoReader
 
@@ -104,6 +107,14 @@ class AnalysisResult:
     warnings: List[str] = field(default_factory=list)
     machine: Optional[MachineAnalysis] = None       # set when telemetry was given
     fps: float = 0.0                # source video; also the annotated video's frame rate
+    force: Optional[ForceAnalysis] = None           # set when a PM5 log and a force setup were given
+    rules: List[Rule] = field(default_factory=list) # the rules applied (after overrides)
+    pm5: Optional[Pm5Session] = None                # the PM5 log, when one was given
+    pm5_sync: Optional[StrokeSync] = None           # its strokes matched to the video's, one by one
+
+    def rule_list(self) -> List[Rule]:
+        """Every per-rep rule that was checked, with its applied threshold."""
+        return self.rules or self.station.rules()
 
     def rep_at_frame(self) -> np.ndarray:
         """(N,) rep list position for each analysed frame, -1 outside reps."""
@@ -116,12 +127,15 @@ class AnalysisResult:
 def analyze(ex: Extraction, station: Station, min_score: float = 0.5,
             overrides: Optional[Dict[str, float]] = None,
             telemetry: Optional[Telemetry] = None,
-            telemetry_offset: Optional[float] = None) -> AnalysisResult:
-    """`telemetry` must already be cleaned; `telemetry_offset` overrides the sync."""
-    overrides = overrides or {}
-    rules = apply_overrides(station.rules(), overrides)
-    drift_rules = apply_overrides([*station.drift_rules(), *machine_drift_rules()], overrides)
+            telemetry_offset: Optional[float] = None,
+            pm5=None, force_setup: Optional[ForceSetup] = None) -> AnalysisResult:
+    """`telemetry` must already be cleaned; `telemetry_offset` overrides the sync.
 
+    `pm5` is a decoded PM5 log (pose_app.pm5.Pm5Session). Without other telemetry
+    it is the machine data, synchronised stroke by stroke; with `force_setup` (on
+    a station that supports it) it also drives the force analysis.
+    """
+    overrides = overrides or {}
     body = build_body_series(ex.t, ex.frame_index, ex.keypoints, ex.scores, min_score, ex.fps)
     driver = body.metrics[station.driver]
     lo, hi = hysteresis_thresholds(driver, station.lo_frac, station.hi_frac)
@@ -129,14 +143,36 @@ def analyze(ex: Extraction, station: Station, min_score: float = 0.5,
         if np.isfinite(lo) else []
 
     metrics = [station.summarize(body, cycle) for cycle in cycles]
+    from_pm5 = pm5 is not None and telemetry is None
+    if from_pm5:
+        telemetry = clean(pm5_telemetry(pm5))
     alignment = None
     if telemetry is not None:
         starts = np.array([m["t_start"] for m in metrics])
         durations = np.array([m["duration_s"] for m in metrics])
         from_rest = _starts_from_rest(driver, body.t, cycles)
         alignment = align(telemetry, starts, durations, from_rest, telemetry_offset)
-        attach(metrics, telemetry, alignment)
 
+    force, sync = None, None
+    if pm5 is not None:
+        prior, window = _sync_prior(alignment, telemetry_offset, from_pm5)
+        if force_setup is not None and station.force:
+            force = analyze_force(ex.t, ex.keypoints, ex.scores, body, cycles, ex.fps, pm5,
+                                  force_setup, min_score, prior, window)
+            sync = force.sync
+        else:
+            sync = sync_by_hands(body, cycles, pm5, prior, window)
+        if from_pm5 and telemetry_offset is None and sync.ok:
+            alignment = _stroke_alignment(sync, alignment)
+    if telemetry is not None:
+        attach(metrics, telemetry, alignment)
+    if force is not None:
+        attach_force(metrics, force)
+
+    extra = force is not None
+    rules = apply_overrides([*station.rules(), *(force_rules() if extra else [])], overrides)
+    drift_rules = apply_overrides([*station.drift_rules(), *machine_drift_rules(),
+                                   *(force_drift_rules() if extra else [])], overrides)
     reps = []
     for k, (cycle, m) in enumerate(zip(cycles, metrics), 1):
         faults = [f for f in (r.check(m) for r in rules) if f is not None]
@@ -144,11 +180,36 @@ def analyze(ex: Extraction, station: Station, min_score: float = 0.5,
     drift = evaluate_drift(drift_rules, [r.metrics for r in reps])
 
     thresholds = {r.id: r.threshold for r in (*rules, *drift_rules)}
-    result = AnalysisResult(station, body, reps, drift, thresholds, fps=ex.fps)
+    result = AnalysisResult(station, body, reps, drift, thresholds, fps=ex.fps, force=force,
+                            rules=rules, pm5=pm5, pm5_sync=sync)
     if telemetry is not None:
         result.machine = analyze_machine(telemetry, alignment, reps, rules)
     result.warnings = _warnings(result)
     return result
+
+
+def _sync_prior(alignment: Optional[Alignment], manual: Optional[float],
+                same_clock: bool) -> Tuple[Optional[float], float]:
+    """Where to look for the stroke-by-stroke offset: around a hand-set offset, around the
+    coarse sync of the same log, or everywhere. Both are on the PM5 log's clock only when
+    the log is the machine data (`same_clock`); another file's offset says nothing about it."""
+    if not same_clock:
+        return None, 0.0
+    if manual is not None:
+        return float(manual), 1.0
+    if alignment is not None and alignment.ok:
+        return float(alignment.offset), 3.0
+    return None, 0.0
+
+
+def _stroke_alignment(sync: StrokeSync, coarse: Optional[Alignment]) -> Alignment:
+    al = Alignment(sync.offset, "strokes", sync.confidence)
+    if coarse is not None:
+        al.rate_r, al.rate_offset, al.onset_offset = coarse.rate_r, coarse.rate_offset, \
+            coarse.onset_offset
+    al.notes = [f"Aligned stroke by stroke on the PM5's own stroke times "
+                f"({len(sync.pairs)} strokes matched).", f"Video 0 s = machine {sync.offset:+.2f} s."]
+    return al
 
 
 def _starts_from_rest(driver: np.ndarray, t: np.ndarray, cycles: List[Cycle]) -> bool:
@@ -184,4 +245,6 @@ def _warnings(res: AnalysisResult) -> List[str]:
         if not al.ok or al.confidence == "low":
             w.extend(al.notes[:1])
         w.extend(res.machine.checks)
+    if res.force is not None:
+        w.extend(res.force.checks)
     return w
