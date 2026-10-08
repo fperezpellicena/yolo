@@ -173,6 +173,35 @@ def test_job_writes_outputs_next_to_the_upload_and_sends_the_report():
     assert not _run_once(cfg)                       # queue is empty now
 
 
+class _NoDetector:
+    """Fails the job if the pose pass runs."""
+    def detect(self, frame):
+        raise AssertionError("the pose pass ran again")
+
+
+def test_a_job_run_again_on_the_same_uploads_reuses_the_pose_pass():
+    cfg, api, folder = _setup()
+    first = api.queue(f"{folder}/clip.mp4", folder, options={"video": False})
+    assert _run_once(cfg) and api.jobs[first]["status"] == "SUCCEEDED"
+    # As when the athlete adds the force analysis' setup: other options, the same video and clip
+    again = api.queue(f"{folder}/clip.mp4", folder,
+                      options={"video": False, "thresholds": {"early_arm_pull": 0.2}})
+    assert _run_once(cfg, _NoDetector())
+    state = api.jobs[again]
+    assert state["status"] == "SUCCEEDED", state.get("outcome")
+    assert state["outcome"]["report"]["reps"] == len(KINDS)
+    stages = {body.get("stage") for action, job, body in api.calls
+              if action == "progress" and job == again}
+    assert "pose" not in stages, stages
+    assert _listing(cfg, folder) == ["clip.mp4", "pose_cache.npz"]
+    # Another clip needs its own pose pass
+    clip = api.queue(f"{folder}/clip.mp4", folder, options={"video": False, "start": 0.5})
+    assert _run_once(cfg)
+    assert api.jobs[clip]["status"] == "SUCCEEDED"
+    assert any(body.get("stage") == "pose" for action, job, body in api.calls
+               if action == "progress" and job == clip)
+
+
 def test_unusable_inputs_fail_without_retry():
     cfg, api, folder = _setup()
     with open(os.path.join(cfg.media_root, folder, "junk.mp4"), "w") as fh:

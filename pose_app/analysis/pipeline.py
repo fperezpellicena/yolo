@@ -1,7 +1,8 @@
 """Pass 1 (pose extraction, cacheable) and the analysis that runs on it."""
 
+import json
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -37,22 +38,26 @@ class Extraction:
     keypoints: np.ndarray             # (N, 17, 2), NaN when no athlete
     scores: np.ndarray                # (N, 17), 0 when no athlete
     boxes: np.ndarray                 # (N, 4), NaN when no athlete
+    # What the pass depended on (video, clip, athlete choice, model settings), so a later
+    # run can tell whether it can reuse it; {} in caches written before it was kept
+    params: Dict[str, Any] = field(default_factory=dict)
 
     def save(self, path: str) -> None:
         np.savez_compressed(
             path, version=CACHE_VERSION, video_path=self.video_path, fps=self.fps,
             frame_size=np.array(self.frame_size), model=self.model, t=self.t,
             frame_index=self.frame_index, keypoints=self.keypoints,
-            scores=self.scores, boxes=self.boxes)
+            scores=self.scores, boxes=self.boxes, params=json.dumps(self.params))
 
     @classmethod
     def load(cls, path: str) -> "Extraction":
         d = np.load(path, allow_pickle=False)
         if int(d["version"]) != CACHE_VERSION:
             raise ValueError("pose cache was written by another version; re-run without --reuse")
+        params = json.loads(str(d["params"])) if "params" in d.files else {}
         return cls(str(d["video_path"]), float(d["fps"]), tuple(int(v) for v in d["frame_size"]),
                    str(d["model"]), d["t"], d["frame_index"], d["keypoints"],
-                   d["scores"], d["boxes"])
+                   d["scores"], d["boxes"], params)
 
 
 def extract(reader: VideoReader, detect: Callable[[np.ndarray], List[Person]],

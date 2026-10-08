@@ -10,7 +10,7 @@ AnalysisError with a code from ERROR_CODES, which callers turn into their own
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .force import ForceSetup, force_drift_rules, force_rules
 from .pipeline import AnalysisResult, EmptyClipError, Extraction, analyze, extract
@@ -32,6 +32,11 @@ OUTPUT_FILES = {"pose_cache": "pose_cache.npz",
 
 # (stage, frames done, frames in the clip or 0 if unknown); stage is "pose" or "video"
 ProgressFn = Callable[[str, int, int], None]
+
+# What the pose pass depends on, kept in pose_cache.npz: the frames it saw, the athlete it
+# followed, and the model settings that found the keypoints
+CLIP_KEYS = ("start", "end", "rotate", "athlete", "athlete_point")
+MODEL_KEYS = ("model", "imgsz", "conf", "kpt_conf")
 
 
 # Why the inputs cannot be analysed. The codes are a contract with callers such
@@ -81,7 +86,10 @@ class AnalysisOptions:
     report: bool = True                             # write report.html
     csv: bool = True                                # write reps.csv
     video_width: int = 1280
-    reuse: bool = False                             # reuse pose_cache.npz if present
+    reuse: bool = False                             # reuse out_dir's pose_cache.npz if present
+    # A previous run's pose_cache.npz (e.g. a job run again with other options), reused
+    # only when it was made from the same video with the same clip, athlete and model settings
+    pose_cache: Optional[str] = None
     title: Optional[str] = None                     # report heading
 
 
@@ -137,7 +145,8 @@ def run_analysis(video_path: str, out_dir: str, opts: Optional[AnalysisOptions] 
     log.info(f"{info.path}: {info.width}x{info.height}, {info.fps:.1f} fps, "
              f"{info.duration:.1f} s  ->  {out_dir}")
 
-    ex = _extraction(reader, opts, files["pose_cache"], estimator, on_progress)
+    ex = _extraction(reader, opts, files["pose_cache"], estimator, on_progress,
+                     pose_params(video_path, opts))
     res = analyze(ex, station, opts.kpt_conf, opts.thresholds, telemetry, opts.telemetry_offset,
                   pm5, opts.force)
     if res.machine is not None:
@@ -196,14 +205,48 @@ def _load_pm5(path: str):
     return session
 
 
+def pose_params(video_path: str, opts: AnalysisOptions) -> Dict[str, Any]:
+    """What a pose pass of `video_path` with `opts` depends on, as JSON-ready values."""
+    params: Dict[str, Any] = {"video": os.path.basename(video_path),
+                              "video_bytes": os.path.getsize(video_path)}
+    for key in CLIP_KEYS + MODEL_KEYS:
+        value = getattr(opts, key)
+        params[key] = [float(v) for v in value] if isinstance(value, (tuple, list)) else value
+    return params
+
+
 def _extraction(reader: VideoReader, opts: AnalysisOptions, cache: str, estimator,
-                on_progress: Optional[ProgressFn]) -> Extraction:
-    if opts.reuse and os.path.exists(cache):
-        log.info("Reusing cached pose pass.")
+                on_progress: Optional[ProgressFn], params: Dict[str, Any]) -> Extraction:
+    # --reuse asks for the output folder's own cache whatever model made it, so only its video
+    # and clip must match; a previous run's cache must match in everything
+    clip = ("video", "video_bytes", *CLIP_KEYS)
+    if opts.reuse:
+        if not os.path.exists(cache):
+            log.info("No pose cache to reuse yet.")
+        else:
+            try:
+                ex = Extraction.load(cache)
+            except ValueError as exc:               # a cache from another version
+                raise AnalysisError("invalid_job", str(exc)) from exc
+            changed = _changed(ex.params, params, clip) if ex.params else []   # {}: an older cache
+            if not changed:
+                log.info("Reusing cached pose pass.")
+                return ex
+            log.info("Not reusing the pose cache: made with another " + ", ".join(changed) + ".")
+    if opts.pose_cache and os.path.exists(opts.pose_cache):
         try:
-            return Extraction.load(cache)
-        except ValueError as exc:                   # a cache from another version
-            raise AnalysisError("invalid_job", str(exc)) from exc
+            ex = Extraction.load(opts.pose_cache)
+        except ValueError as exc:
+            log.info(f"Not reusing the previous pose pass: {exc}")
+        else:
+            changed = _changed(ex.params, params, tuple(params))
+            if not changed:
+                log.info("Reusing the previous run's pose pass.")
+                if os.path.abspath(opts.pose_cache) != os.path.abspath(cache):
+                    ex.save(cache)
+                return ex
+            log.info("Not reusing the previous pose pass: made with another " +
+                     ", ".join(changed) + ".")
     if estimator is None:
         from ..estimator import PoseEstimator
         estimator = PoseEstimator(opts.model, opts.conf, opts.imgsz, opts.device, opts.kpt_conf)
@@ -213,8 +256,14 @@ def _extraction(reader: VideoReader, opts: AnalysisOptions, cache: str, estimato
         ex = extract(reader, estimator.detect, tracker, opts.model, _stage(on_progress, "pose"))
     except EmptyClipError as exc:
         raise AnalysisError("empty_clip", str(exc)) from exc
+    ex.params = params
     ex.save(cache)
     return ex
+
+
+def _changed(cached: Dict[str, Any], wanted: Dict[str, Any], keys) -> List[str]:
+    """Which of `keys` differ between a cached pose pass and this run ([] = reusable)."""
+    return [k for k in keys if k not in cached or cached[k] != wanted.get(k)]
 
 
 def _stage(on_progress: Optional[ProgressFn], stage: str) -> Optional[Callable[[int, int], None]]:
