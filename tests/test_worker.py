@@ -52,12 +52,13 @@ class FakeApi:
         self.server.shutdown()
         self.server.server_close()
 
-    def queue(self, video, output_dir, station="skierg", telemetry=None, options=None) -> int:
+    def queue(self, video, output_dir, station="skierg", telemetry=None, options=None,
+              pm5=None) -> int:
         with self.lock:
             job_id = len(self.jobs) + 1
             self.jobs[job_id] = {"status": "QUEUED", "station": station, "video": video,
                                  "telemetry": telemetry, "output_dir": output_dir,
-                                 "options": options, "attempts": 0, "worker": None}
+                                 "options": options, "attempts": 0, "worker": None, "pm5": pm5}
         return job_id
 
     def cancel(self, job_id):
@@ -100,6 +101,8 @@ class FakeApi:
         inputs = {"video": job["video"]}
         if job["telemetry"]:
             inputs["telemetry"] = job["telemetry"]
+        if job["pm5"]:
+            inputs["pm5"] = job["pm5"]
         return 200, {"id": job_id, "station": job["station"], "options": job["options"] or {},
                      "inputs": inputs, "output_dir": job["output_dir"], "attempt": job["attempts"]}
 
@@ -198,6 +201,32 @@ def test_unusable_inputs_fail_without_retry():
         assert outcome["code"] == code and not outcome["retryable"], (code, outcome)
         assert text in outcome["message"], (text, outcome)
     assert _listing(cfg, folder) == ["annotated.mp4", "clip.mp4", "junk.mp4"]
+
+
+def test_force_job_reads_the_pm5_log_and_reports_the_force():
+    import synthetic_force as sf
+    cfg, api, folder = _setup()
+    session = sf.Session(n_strokes=12)
+    base = os.path.join(cfg.media_root, folder)
+    session.write_video(os.path.join(base, "ski.mp4"))
+    session.write_pm5_log(os.path.join(base, "ski.pm5.jsonl"))
+    job = api.queue(f"{folder}/ski.mp4", folder, pm5=f"{folder}/ski.pm5.jsonl",
+                    options={"force": session.setup().to_dict(), "video": False})
+    jobs = _client(cfg)
+    try:
+        assert Worker(cfg, jobs, session.estimator(), "test-worker").run_once()
+    finally:
+        jobs.close()
+    state = api.jobs[job]
+    assert state["status"] == "SUCCEEDED", state.get("outcome")
+    report = state["outcome"]["report"]
+    assert report["force"]["sync"]["confidence"] == "high", report["force"]["sync"]
+    assert report["force"]["summary"]["strokes_with_curve"] >= 8
+    assert report["machine"]["sync"]["method"] == "strokes"
+    bad = api.queue(f"{folder}/ski.mp4", folder, options={"force": session.setup().to_dict()})
+    assert _run_once(cfg, session.estimator())
+    outcome = api.jobs[bad]["outcome"]
+    assert outcome["code"] == "invalid_job" and "PM5 log" in outcome["message"], outcome
 
 
 class _BrokenEstimator(FakeEstimator):

@@ -9,6 +9,7 @@ import numpy as np
 from ..skeleton import KP
 from ..drawing.text import darken, text_size, thickness
 from ..drawing.theme import AA, ACCENT, FONT, TEXT
+from .force.overlay import draw_force, header_line
 from .pipeline import AnalysisResult
 from .video import VideoReader
 
@@ -96,6 +97,8 @@ class Annotator:
         if i is not None:
             row = {k: v[i] for k, v in body.metrics.items()}
             draw_skeleton(img, body.keypoints[i], body.side, row)
+            if res.force is not None:
+                draw_force(img, res.force, i, s)
         k = self.rep_of[i] if i is not None else -1
         rep = res.reps[k] if k >= 0 else None
 
@@ -110,6 +113,10 @@ class Annotator:
             machine = _machine_line(rep.metrics)
             if machine:
                 lines.append(machine)
+            if res.force is not None:
+                force = header_line(res.force, rep.metrics, i)
+                if force:
+                    lines.append(force)
         pad = int(10 * s)
         lh = int(30 * s)
         box_w = max(text_size(l, fs, thickness(fs))[0] for l in lines) + 2 * pad

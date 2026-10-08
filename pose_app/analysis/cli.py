@@ -9,6 +9,7 @@ import time
 from typing import Optional, Sequence, Tuple
 
 from .api import AnalysisError, AnalysisOptions, default_thresholds, run_analysis
+from .force import SEXES, AthleteProfile, Calibration, ForceSetup
 from .stations import STATIONS
 
 
@@ -18,6 +19,15 @@ def _point(text: str) -> Tuple[float, float]:
         return x, y
     except ValueError:
         raise argparse.ArgumentTypeError(f"expected X,Y in pixels, got '{text}'")
+
+
+def _scale(text: str) -> Tuple[Tuple[float, float], Tuple[float, float], float]:
+    try:
+        x0, y0, x1, y1, length = (float(v) for v in text.split(","))
+        return (x0, y0), (x1, y1), length
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"expected X1,Y1,X2,Y2,METRES (the ends of a known length), got '{text}'")
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
@@ -49,6 +59,25 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     tel.add_argument("--telemetry-offset", type=float, default=None, metavar="S",
                      help="machine seconds at video second 0, if automatic sync fails "
                           "(e.g. -3 when the video started 3 s before the app)")
+
+    force = p.add_argument_group(
+        "force analysis (SkiErg with a PM5 log; see README, 'Force analysis')")
+    force.add_argument("--pm5", default=None, metavar="LOG",
+                       help="PM5 Bluetooth log of the piece (pm5_log.py); also the machine data")
+    force.add_argument("--mass", type=float, default=None, help="athlete mass, kg")
+    force.add_argument("--height", type=float, default=None, help="athlete height, m")
+    force.add_argument("--sex", choices=SEXES, default="unspecified",
+                       help="picks the body segment table")
+    force.add_argument("--cord-exit", type=_point, default=None, metavar="X,Y",
+                       help="where the cords leave the machine, pixels in the first frame")
+    force.add_argument("--scale", type=_scale, default=None, metavar="X1,Y1,X2,Y2,M",
+                       help="the ends of a known length in the athlete's plane, and its length "
+                            "in metres (e.g. a 1 m stick); without it the scale comes from height")
+    force.add_argument("--force-setup", default=None, metavar="JSON",
+                       help="athlete and calibration as JSON instead of the flags above")
+    force.add_argument("--calibration-frame", default=None, metavar="JPG",
+                       help="save the clip's first frame with a pixel grid (to read the cord exit "
+                            "and the scale points from) and exit")
 
     model = p.add_argument_group("model")
     model.add_argument("--model", default="yolo11m-pose.pt",
@@ -108,6 +137,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if not args.video:
         print("error: a video file is required", file=sys.stderr)
         return 2
+    if args.calibration_frame:
+        return _calibration_frame(args)
+    try:
+        force = _force_setup(args)
+    except (OSError, TypeError, ValueError) as exc:
+        print(f"error: force setup: {exc}", file=sys.stderr)
+        return 2
 
     thresholds = {}
     if args.thresholds:
@@ -122,7 +158,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         telemetry=args.telemetry, telemetry_offset=args.telemetry_offset,
         thresholds=thresholds, model=args.model, imgsz=args.imgsz, conf=args.conf,
         kpt_conf=args.kpt_conf, device=args.infer_device, video=not args.no_video,
-        video_width=args.video_width, reuse=args.reuse)
+        video_width=args.video_width, reuse=args.reuse, pm5=args.pm5, force=force)
 
     console = _Console()
     logger = logging.getLogger("pose_app")
@@ -140,4 +176,50 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     for w in outcome.warnings:
         print(f"warning: {w}", file=sys.stderr)
     print(f"Done: {outcome.files['report']}")
+    return 0
+
+
+def _force_setup(args: argparse.Namespace) -> Optional[ForceSetup]:
+    """From --force-setup, or from --mass/--height/--cord-exit (all three, or none)."""
+    if args.force_setup:
+        with open(args.force_setup) as fh:
+            return ForceSetup.from_dict(json.load(fh))
+    given = [args.mass is not None, args.height is not None, args.cord_exit is not None]
+    if not any(given):
+        return None
+    if not all(given):
+        raise ValueError("force analysis needs --mass, --height and --cord-exit together "
+                         "(or --force-setup)")
+    points, length = (args.scale[:2], args.scale[2]) if args.scale else (None, None)
+    setup = ForceSetup(AthleteProfile(args.mass, args.height, args.sex),
+                       Calibration(args.cord_exit, points, length))
+    problems = setup.problems()
+    if problems:
+        raise ValueError("; ".join(problems))
+    return setup
+
+
+def _calibration_frame(args: argparse.Namespace) -> int:
+    """The first analysed frame with a labelled pixel grid, to read calibration points from."""
+    import cv2
+    from .video import VideoReader
+    try:
+        reader = VideoReader(args.video, args.start, args.end, args.rotate)
+        _, _, frame = next(iter(reader.frames()))
+    except (RuntimeError, StopIteration) as exc:
+        print(f"error: cannot read a frame: {exc}", file=sys.stderr)
+        return 1
+    h, w = frame.shape[:2]
+    step = 50
+    for x in range(0, w, step):
+        cv2.line(frame, (x, 0), (x, h), (0, 255, 255) if x % 250 == 0 else (90, 90, 90), 1)
+    for y in range(0, h, step):
+        cv2.line(frame, (0, y), (w, y), (0, 255, 255) if y % 250 == 0 else (90, 90, 90), 1)
+    for x in range(0, w, 250):
+        for y in range(0, h, 250):
+            cv2.putText(frame, f"{x},{y}", (x + 3, y + 14), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
+                        (0, 255, 255), 1, cv2.LINE_AA)
+    cv2.imwrite(args.calibration_frame, frame)
+    print(f"Saved {args.calibration_frame} ({w}x{h} px): read the cord exit and the ends of "
+          "the calibration length from it.")
     return 0

@@ -1,6 +1,7 @@
 """A job's options, as the web app sends them, turned into AnalysisOptions."""
 
 from ..analysis.api import AnalysisError, AnalysisOptions
+from ..analysis.force import ForceSetup
 from ..analysis.tracking import SELECT_MODES
 from .config import WorkerConfig
 from .jobs import Job
@@ -16,6 +17,9 @@ JOB_OPTIONS = {
     "telemetry_offset": "machine seconds at video second 0, if automatic sync fails",
     "thresholds": "{rule_id: value} overriding the station's defaults",
     "video": "false to skip the annotated video",
+    "force": "{athlete: {mass_kg, height_m, sex}, calibration: {cord_exit: [x, y], "
+             "scale: {points: [[x, y], [x, y]], length_m}}}: force analysis, with the PM5 log "
+             "as inputs.pm5",
 }
 
 # Converts each JSON value in a job's options to what AnalysisOptions expects.
@@ -29,6 +33,7 @@ _PARSE = {
     "telemetry_offset": float,
     "thresholds": lambda v: {str(k): float(x) for k, x in v.items()},
     "video": lambda v: v if isinstance(v, bool) else _bad(v),
+    "force": ForceSetup.from_dict,
 }
 assert set(_PARSE) == set(JOB_OPTIONS)
 
@@ -43,9 +48,10 @@ def build_analysis_options(job: Job, cfg: WorkerConfig) -> AnalysisOptions:
             continue
         try:
             parsed[key] = _PARSE[key](value)
-        except (TypeError, ValueError, AttributeError):
+        except (TypeError, ValueError, AttributeError) as exc:
+            detail = f" ({exc})" if key == "force" else ""
             raise AnalysisError("invalid_job", f"Invalid job option {key}={value!r}: "
-                                               f"expected {JOB_OPTIONS[key]}.") from None
+                                               f"expected {JOB_OPTIONS[key]}.{detail}") from None
     # No report.html or reps.csv: the web app builds its report from the summary.
     return AnalysisOptions(station=job.station, model=cfg.model, imgsz=cfg.imgsz,
                            device=cfg.device, report=False, csv=False, **parsed)

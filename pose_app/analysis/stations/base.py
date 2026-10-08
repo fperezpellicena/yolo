@@ -37,6 +37,7 @@ class Station:
     phases: Tuple[str, str] = ("phase 1", "phase 2")   # start->mid, mid->end
     filming_tips: Sequence[str] = ()
     charts: Sequence[ChartSpec] = ()
+    force: bool = False                    # force analysis with a PM5 log (analysis/force)
 
     def rules(self) -> List[Rule]:
         raise NotImplementedError

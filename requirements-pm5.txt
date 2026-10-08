@@ -1,0 +1,3 @@
+# Recording a Concept2 PM5 over Bluetooth (pm5_log.py). Reading logs needs only numpy.
+numpy>=1.24
+bleak>=0.22

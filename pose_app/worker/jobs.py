@@ -12,6 +12,9 @@ be a second implementation of the same interface.
     POST {api}/internal/jobs/{id}/complete    {worker, outputs, result, report} -> 204 | 409 | 422
     POST {api}/internal/jobs/{id}/fail        {worker, code, message, retryable} -> 204 | 409
 
+A claimed job's `inputs` hold `video` and optionally `telemetry` (machine data
+CSV) and `pm5` (PM5 Bluetooth log, for the force analysis).
+
 409 means the job is no longer ours (cancelled, or given to another worker
 after we went silent): the worker drops it. Progress doubles as the
 heartbeat; the web app requeues a job that stays silent too long, and decides
@@ -41,6 +44,7 @@ class Job:
     output_dir: str                 # key of the folder to write the outputs in
     options: Dict[str, Any]
     attempt: int                    # 1 on the first run
+    pm5: Optional[str] = None       # key of the PM5 Bluetooth log, if any (force analysis)
 
 
 class JobClient(Protocol):
@@ -101,7 +105,8 @@ class HttpJobClient:
         inputs = body["inputs"]
         return Job(id=body["id"], station=body["station"], video=inputs["video"],
                    telemetry=inputs.get("telemetry"), output_dir=body["output_dir"],
-                   options=body.get("options") or {}, attempt=body["attempt"])
+                   options=body.get("options") or {}, attempt=body["attempt"],
+                   pm5=inputs.get("pm5"))
 
     def progress(self, job: Job, worker_id: str, stage: Optional[str], pct: Optional[int]) -> bool:
         return self._report(job, "progress", {"worker": worker_id, "stage": stage, "progress": pct})

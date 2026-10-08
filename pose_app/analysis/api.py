@@ -12,6 +12,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
 
+from .force import ForceSetup, force_drift_rules, force_rules
 from .pipeline import AnalysisResult, EmptyClipError, Extraction, analyze, extract
 from .report import write_csv, write_html, write_json
 from .stations import STATIONS
@@ -37,7 +38,7 @@ ProgressFn = Callable[[str, int, int], None]
 # as the web app, which maps each one to a message of its own: keep them stable.
 ERROR_CODES = {
     "unreadable_video": "the video cannot be opened or has no readable frames",
-    "unreadable_telemetry": "the telemetry file cannot be read",
+    "unreadable_telemetry": "the telemetry file or the PM5 log cannot be read",
     "empty_clip": "no frames between the start and end times",
     "unsupported_station": "the station is not analysed yet",
     "invalid_job": "the request itself is wrong (options, folder or file names): "
@@ -68,6 +69,8 @@ class AnalysisOptions:
     athlete_point: Optional[Tuple[float, float]] = None
     telemetry: Optional[str] = None                 # machine data CSV path
     telemetry_offset: Optional[float] = None        # machine s at video 0 s
+    pm5: Optional[str] = None                       # PM5 Bluetooth log (pm5_log.py) path
+    force: Optional[ForceSetup] = None              # athlete + calibration: force analysis
     thresholds: Dict[str, float] = field(default_factory=dict)   # rule id -> value
     model: str = "yolo11m-pose.pt"
     imgsz: int = 960
@@ -93,7 +96,9 @@ class AnalysisOutcome:
 def default_thresholds(station: str) -> Dict[str, float]:
     """Every tunable rule id for the station with its default value."""
     st = _station(station)
-    return {r.id: r.threshold for r in (*st.rules(), *st.drift_rules(), *machine_drift_rules())}
+    force = [*force_rules(), *force_drift_rules()] if st.force else []
+    return {r.id: r.threshold for r in (*st.rules(), *st.drift_rules(), *machine_drift_rules(),
+                                        *force)}
 
 
 def run_analysis(video_path: str, out_dir: str, opts: Optional[AnalysisOptions] = None,
@@ -110,6 +115,15 @@ def run_analysis(video_path: str, out_dir: str, opts: Optional[AnalysisOptions] 
     warnings = [f"Unknown threshold ids ignored: {sorted(unknown)}"] if unknown else []
 
     telemetry = _load_telemetry(opts.telemetry) if opts.telemetry else None
+    if opts.force is not None:
+        problems = opts.force.problems()
+        if problems:
+            raise AnalysisError("invalid_job", "Invalid force setup: " + "; ".join(problems) + ".")
+        if not station.force:
+            raise AnalysisError("invalid_job", f"Force analysis is not available for {station.name}.")
+        if not opts.pm5:
+            raise AnalysisError("invalid_job", "Force analysis needs the PM5 log of the piece.")
+    pm5 = _load_pm5(opts.pm5) if opts.pm5 else None
     try:
         reader = VideoReader(video_path, opts.start, opts.end, opts.rotate)
     except RuntimeError as exc:
@@ -124,11 +138,16 @@ def run_analysis(video_path: str, out_dir: str, opts: Optional[AnalysisOptions] 
              f"{info.duration:.1f} s  ->  {out_dir}")
 
     ex = _extraction(reader, opts, files["pose_cache"], estimator, on_progress)
-    res = analyze(ex, station, opts.kpt_conf, opts.thresholds, telemetry, opts.telemetry_offset)
+    res = analyze(ex, station, opts.kpt_conf, opts.thresholds, telemetry, opts.telemetry_offset,
+                  pm5, opts.force)
     if res.machine is not None:
         al = res.machine.alignment
         log.info(f"Sync: {al.method} ({al.confidence})" +
                  (f", video 0 s = machine {al.offset:+.2f} s." if al.ok else "."))
+    if res.force is not None:
+        fs = res.force.summary
+        log.info(f"Force: {fs.get('strokes_with_curve', 0):.0f} strokes with force curves "
+                 f"(stroke match {res.force.sync.confidence}).")
     log.info(f"{len(res.reps)} {station.rep_word}s, "
              f"{sum(1 for r in res.reps if not r.faults)} clean.")
 
@@ -165,6 +184,16 @@ def _load_telemetry(path: str) -> Telemetry:
     a, b = telemetry.active_span
     log.info(f"Machine data: {telemetry.source}, active {b - a:.0f} s.")
     return telemetry
+
+
+def _load_pm5(path: str):
+    from ..pm5 import load_pm5_session
+    try:
+        session = load_pm5_session(path)
+    except (OSError, ValueError) as exc:
+        raise AnalysisError("unreadable_telemetry", str(exc)) from exc
+    log.info(f"PM5 log: {session.describe()}.")
+    return session
 
 
 def _extraction(reader: VideoReader, opts: AnalysisOptions, cache: str, estimator,
