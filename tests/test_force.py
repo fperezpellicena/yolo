@@ -274,8 +274,17 @@ def test_pm5_log_without_setup_syncs_the_machine_data():
     res = _run(None, log, out="plain").result
     assert res.force is None and res.machine.alignment.method == "strokes"
     assert abs(res.machine.alignment.offset - (sf.LOG_OFFSET - 0.2)) < 0.1
-    assert any("force analysis was skipped" in w for w in res.warnings)
     assert all("f_bw_share" not in r.metrics for r in res.reps)
+    # Not a problem with the recording: the command line says how to turn it on
+    assert not any("force" in w for w in res.warnings), res.warnings
+    import contextlib, io
+    from pose_app.analysis.cli import main
+    _, video, _, _ = _inputs()
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+        assert main([video, "--out", os.path.join(_state["dir"], "plain"), "--reuse",
+                     "--no-video", "--pm5", log]) == 0
+    assert "add --mass, --height and --cord-exit" in err.getvalue(), err.getvalue()
 
 
 def test_every_pm5_stroke_and_its_curve_go_in_the_summary():

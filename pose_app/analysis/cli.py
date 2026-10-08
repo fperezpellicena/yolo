@@ -175,6 +175,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     console.end_line()
     for w in outcome.warnings:
         print(f"warning: {w}", file=sys.stderr)
+    res = outcome.result
+    if res.pm5 is not None and res.force is None and res.station.force and res.pm5.curves:
+        print("note: the PM5 log has force curves; add --mass, --height and --cord-exit "
+              "(and --scale) for the force analysis.", file=sys.stderr)
     print(f"Done: {outcome.files['report']}")
     return 0
 

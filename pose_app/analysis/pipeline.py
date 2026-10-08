@@ -185,9 +185,6 @@ def analyze(ex: Extraction, station: Station, min_score: float = 0.5,
     if telemetry is not None:
         result.machine = analyze_machine(telemetry, alignment, reps, rules)
     result.warnings = _warnings(result)
-    if pm5 is not None and force is None and station.force and pm5.curves:
-        result.warnings.append("The PM5 log has force curves, but no athlete profile and "
-                               "calibration were given, so the force analysis was skipped.")
     return result
 
 
