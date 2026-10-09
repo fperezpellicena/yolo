@@ -9,8 +9,8 @@ import numpy as np
 from ..person import Person
 from ..pm5 import Pm5Session
 from .body import BodySeries, build_body_series
-from .force import (ForceAnalysis, ForceSetup, StrokeSync, analyze_force, attach_force,
-                    force_drift_rules, force_rules, sync_by_hands)
+from .force import (ForceAnalysis, ForceSetup, StrokeSync, analyze_force, analyze_geometry,
+                    attach_force, force_drift_rules, force_rules, sync_by_hands)
 from .rules import Drift, Fault, Rule, apply_overrides, evaluate_drift
 from .signal import Cycle, find_cycles, hysteresis_thresholds
 from .stations import Station
@@ -113,6 +113,8 @@ class AnalysisResult:
     machine: Optional[MachineAnalysis] = None       # set when telemetry was given
     fps: float = 0.0                # source video; also the annotated video's frame rate
     force: Optional[ForceAnalysis] = None           # set when a PM5 log and a force setup were given
+    # A force setup without a PM5 log: the force model from the video alone (forces.json only)
+    force_geometry: Optional[ForceAnalysis] = None
     rules: List[Rule] = field(default_factory=list) # the rules applied (after overrides)
     pm5: Optional[Pm5Session] = None                # the PM5 log, when one was given
     pm5_sync: Optional[StrokeSync] = None           # its strokes matched to the video's, one by one
@@ -190,6 +192,10 @@ def analyze(ex: Extraction, station: Station, min_score: float = 0.5,
     if telemetry is not None:
         result.machine = analyze_machine(telemetry, alignment, reps, rules)
     result.warnings = _warnings(result)
+    if pm5 is None and force_setup is not None and station.force:
+        result.force_geometry = analyze_geometry(ex.t, ex.keypoints, ex.scores, body, cycles,
+                                                 ex.fps, force_setup, min_score)
+        result.warnings.extend(result.force_geometry.checks)
     return result
 
 

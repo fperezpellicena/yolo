@@ -256,11 +256,21 @@ def test_force_job_reads_the_pm5_log_and_reports_the_force():
     # The force model frame by frame, next to the upload, for the page to draw over the video
     assert state["outcome"]["outputs"]["force_frames"] == f"{folder}/forces.json"
     assert "forces.json" in _listing(cfg, folder)
-    bad = api.queue(f"{folder}/ski.mp4", folder, options={"force": session.setup().to_dict()})
+    bad = api.queue(f"{folder}/ski.mp4", folder, pm5=f"{folder}/ski.pm5.jsonl",
+                    options={"force": {**session.setup().to_dict(), "athlete": {"mass_kg": 80, "height_m": 180}}})
     assert _run_once(cfg, session.estimator())
     outcome = api.jobs[bad]["outcome"]
-    assert outcome["code"] == "invalid_job" and "PM5 log" in outcome["message"], outcome
+    assert outcome["code"] == "invalid_job", outcome
     assert "forces.json" in _listing(cfg, folder)       # a failed run leaves the last one's
+    # Without the PM5 log, the force model is drawn from the video alone
+    geometry = api.queue(f"{folder}/ski.mp4", folder, options={"force": session.setup().to_dict(),
+                                                               "video": False})
+    assert _run_once(cfg, session.estimator())
+    assert api.jobs[geometry]["status"] == "SUCCEEDED", api.jobs[geometry].get("outcome")
+    assert api.jobs[geometry]["outcome"]["outputs"]["force_frames"] == f"{folder}/forces.json"
+    assert api.jobs[geometry]["outcome"]["report"]["force"] is None
+    with open(os.path.join(cfg.media_root, folder, "forces.json")) as fh:
+        assert json.load(fh)["mode"] == "geometry"
     # A run without the force analysis takes the last run's model away with its results
     plain = api.queue(f"{folder}/ski.mp4", folder, pm5=f"{folder}/ski.pm5.jsonl",
                       options={"video": False})

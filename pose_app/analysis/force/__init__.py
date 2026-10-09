@@ -10,11 +10,13 @@
     overlay.py      the force lines drawn on the annotated video
 """
 
-from .analysis import FORCE_KEYS, ForceAnalysis, analyze_force, attach_force, sync_by_hands
+from .analysis import (FORCE_KEYS, ForceAnalysis, analyze_force, analyze_geometry, attach_force,
+                       sync_by_hands)
 from .rules import FORCE_CHARTS, force_drift_rules, force_rules
 from .setup import SEXES, AthleteProfile, Calibration, ForceSetup
 from .sync import StrokeSync
 
-__all__ = ["FORCE_KEYS", "ForceAnalysis", "analyze_force", "attach_force", "sync_by_hands",
+__all__ = ["FORCE_KEYS", "ForceAnalysis", "analyze_force", "analyze_geometry", "attach_force",
+           "sync_by_hands",
            "FORCE_CHARTS", "force_drift_rules", "force_rules", "SEXES", "AthleteProfile",
            "Calibration", "ForceSetup", "StrokeSync"]
