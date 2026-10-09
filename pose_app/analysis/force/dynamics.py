@@ -13,7 +13,7 @@ energy plus the work done on the cord: the energy check.
 """
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, Tuple
 
 import numpy as np
@@ -40,6 +40,9 @@ class Dynamics:
     energy: np.ndarray               # (N,) J: kinetic + potential energy of the moving segments
     floor: np.ndarray                # (N, 2) floor reaction, both feet (not reported yet)
     cop_x: np.ndarray                # (N,) centre of pressure, m from the ankle (not reported yet)
+    # joint -> (N, 2) N: the force on the joint's hand side from the body below it, both sides
+    # together. Its opposite is what the joint passes on towards the floor.
+    joint_force: Dict[str, np.ndarray] = field(default_factory=dict)
 
     @property
     def joint_power(self) -> np.ndarray:
@@ -51,13 +54,15 @@ def inverse_dynamics(kin: Kinematics, model: BodyModel, cord: np.ndarray) -> Dyn
     grip = kin.points["grip"]
     load = {n: s.mass * (kin.com_acc[n] - GRAVITY) for n, s in model.segments.items()}
     spin = {n: s.inertia * kin.alpha[n] for n, s in model.segments.items()}
-    moment, power = {}, {}
+    moment, power, force = {}, {}, {}
     for joint, segs in HAND_SIDE.items():
         r = kin.points[JOINT_POINT[joint]]
         m = np.zeros(len(kin.t)) if joint == "neck" else -cross(grip - r, cord)
         for n in segs:
             m = m + spin[n] + cross(kin.com[n] - r, load[n])
         moment[joint] = m
+        # Newton on the hand side: what moves it, less the cord's pull (the head hangs off the neck)
+        force[joint] = sum(load[n] for n in segs) - (0.0 if joint == "neck" else cord)
         hand, floor = JOINT_SEGMENTS[joint]
         power[joint] = m * (kin.omega[hand] - (kin.omega[floor] if floor else 0.0))
     energy = sum(s.mass * (0.5 * np.sum(kin.com_vel[n] ** 2, axis=1) + G * kin.com[n][:, 1]) +
@@ -68,7 +73,7 @@ def inverse_dynamics(kin: Kinematics, model: BodyModel, cord: np.ndarray) -> Dyn
     turn = turn + cross(model.feet_com, feet) - cross(grip, cord)
     with np.errstate(invalid="ignore", divide="ignore"):
         cop = turn / floor[:, 1]
-    return Dynamics(moment, power, energy, floor, cop)
+    return Dynamics(moment, power, energy, floor, cop, force)
 
 
 def static_capacity(com_x: float, grip: np.ndarray, u: np.ndarray,

@@ -253,10 +253,21 @@ def test_force_job_reads_the_pm5_log_and_reports_the_force():
     assert report["force"]["summary"]["strokes_with_curve"] >= 8
     assert report["machine"]["sync"]["method"] == "strokes"
     assert len(report["pm5"]["strokes"]) == 12 and report["pm5"]["curves"] == 11
+    # The force model frame by frame, next to the upload, for the page to draw over the video
+    assert state["outcome"]["outputs"]["force_frames"] == f"{folder}/forces.json"
+    assert "forces.json" in _listing(cfg, folder)
     bad = api.queue(f"{folder}/ski.mp4", folder, options={"force": session.setup().to_dict()})
     assert _run_once(cfg, session.estimator())
     outcome = api.jobs[bad]["outcome"]
     assert outcome["code"] == "invalid_job" and "PM5 log" in outcome["message"], outcome
+    assert "forces.json" in _listing(cfg, folder)       # a failed run leaves the last one's
+    # A run without the force analysis takes the last run's model away with its results
+    plain = api.queue(f"{folder}/ski.mp4", folder, pm5=f"{folder}/ski.pm5.jsonl",
+                      options={"video": False})
+    assert _run_once(cfg, session.estimator())
+    assert api.jobs[plain]["status"] == "SUCCEEDED"
+    assert "force_frames" not in api.jobs[plain]["outcome"]["outputs"]
+    assert "forces.json" not in _listing(cfg, folder)
 
 
 class _BrokenEstimator(FakeEstimator):

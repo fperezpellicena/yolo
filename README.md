@@ -19,6 +19,7 @@ Writes `<clip>_analysis/` containing:
     annotated.mp4    skeleton, rep counter, phase and the cue for each rep
     reps.csv         every metric for every rep
     summary.json     machine-readable summary
+    forces.json      the force model frame by frame (with the force analysis, below)
     pose_cache.npz   the pose pass, so re-analysis is instant
 
 Tuning thresholds with a coach (no re-running the model):
@@ -95,6 +96,8 @@ What it adds:
   its line of action through the body, and the moment arms from the shoulder and
   the elbow with their moments per side; always the cord, the cord exit and the
   body's centre of mass; "cord 312 N  body weight 41%" in the header.
+* forces.json: the force model of every analysed frame, for a page to draw
+  over the video (see "forces.json" below).
 * report.html: a "Force analysis" section (averages, the mean force curve early
   and late in the piece, a peak-force frame, data checks) and force charts.
   A PM5 log alone, without the setup, already gives a "PM5 force curves"
@@ -183,7 +186,8 @@ job worker should call:
     outcome = run_analysis("clip.mp4", "out/", AnalysisOptions(station="skierg"),
                            estimator=None,                  # or a PoseEstimator loaded once
                            on_progress=lambda stage, done, total: ...)
-    outcome.files       # {"report": ..., "summary": ..., "reps": ..., "video": ..., "pose_cache": ...}
+    outcome.files       # {"report": ..., "summary": ..., "reps": ..., "video": ..., "pose_cache": ...,
+                        #  "forces": ... (with the force analysis)}
     outcome.warnings    # messages for the athlete / coach
 
 It never prints. Status lines go to the `pose_app` logger, and unusable inputs
@@ -199,8 +203,15 @@ API, and the two share only the media folder, where the web app saves the
 uploads and the worker writes its outputs next to them:
 
     POST /internal/jobs/claim --> run_analysis() on <media root>/<inputs.video>
-        -> annotated.mp4, pose_cache.npz written in <media root>/<output_dir>
+        -> annotated.mp4, pose_cache.npz (and forces.json with the force analysis)
+           written in <media root>/<output_dir>
         -> POST /internal/jobs/{id}/complete with the report (summary.json) / .../fail
+
+The complete call lists the files in `outputs`: `annotated_video`,
+`pose_cache` and, with the force analysis, `force_frames`. A run that does not
+write forces.json removes the one an earlier run left, so the folder never
+pairs new results with an old force model; a failed run leaves every file as
+it was.
 
 A job run again on the same uploads, as when the athlete adds the force
 analysis' setup, reuses the last run's pose_cache.npz if the video, clip,
@@ -303,6 +314,36 @@ Everything the report shows, for the web app to draw its own
   each end and evenly spaced by `spacing` (null when the curve was lost),
   with `peak_pct`, where along it the force peaks (0-100).
 
+### forces.json
+
+The force model of every analysed frame (`pose_app/analysis/force/frames.py`),
+for a page to draw over the uploaded video as it plays. Positions are in the
+analysed frame's pixels (the uploaded video as displayed: x right, y down),
+forces in newtons in the same directions, both sides of the body together;
+pairs are flattened `[x0, y0, x1, y1, ...]` and a missing value is null.
+
+* Once: `version` (1), `fps`, `frame_size`, `px_per_m`, `facing`, `mass_kg`,
+  `weight_n`, `cord_exit`, `floor_y`, `fixed_points` (ankle, heel and toe: the
+  feet are flat and still in the model), `feet` (mass and centre of mass),
+  `segments` (name, the points it joins, its mass, its centre of mass as a
+  fraction from `from` to `to`, and the points to draw it between),
+  `joints` (elbow, shoulder, hip, knee, ankle), `reported` (elbow and
+  shoulder) and `moment_names` (the anatomical name of a positive and a
+  negative moment at each joint).
+* Per frame: `t` (seconds in the uploaded video), `points` (grip, wrist, elbow,
+  shoulder, ear, hip, knee), `body_com`, `tension` (the cords' pull on the
+  hands along the grip -> cord exit line; 0 between drives), `passed` (at each
+  joint, the force the body above it passes on to the body below it, towards
+  the floor), `floor` (the floor's force on the feet) and `cop_x` (where it
+  acts on the floor line), and `moment` (per side, positive as the first of
+  `moment_names`).
+
+The hip, knee and ankle values and the floor reaction are estimates, as in
+the report: one side-on camera does not measure them well enough until a
+validation study says otherwise. Their sum checks out: the still feet take
+what the ankle passes on, their weight and the floor's force, to within a
+newton. About 190 bytes a frame: some 1.4 MB for four minutes at 30 fps.
+
 Times: `t` / `t_start` are seconds in the uploaded video; `video_t*` are
 seconds in annotated.mp4 (which starts at the clip start), so the web app can
 seek the player straight to a rep or a fault.
@@ -368,11 +409,12 @@ full-screen-capable view: original feed | pose overlay | joint-angle panel.
                 setup.py        athlete profile + calibration
                 model.py        de Leva body segments
                 kinematics.py   zero-lag filter, pixels -> metres, segment motion
-                dynamics.py     joint moments, power, energy, force capacity
+                dynamics.py     joint moments and forces, power, energy, force capacity
                 sync.py         PM5 strokes <-> video strokes, curves onto frames
                 analysis.py     the chain + per-stroke f_* metrics and checks
                 rules.py        force rules, fatigue checks, charts
                 overlay.py      force lines on the annotated video
+                frames.py       the force model frame by frame (forces.json)
         pm5/                    Concept2 PM5 over Bluetooth
             protocol.py         UUIDs, byte layouts, force-curve packets
             log.py              raw log (JSON lines) reader / writer

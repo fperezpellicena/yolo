@@ -232,6 +232,56 @@ def test_overlay_draws_the_force_line():
     assert orange(Annotator(res).draw(blank.copy(), recovery)) == 0
 
 
+def test_the_force_model_goes_frame_by_frame_into_forces_json():
+    session, _, log, _ = _inputs()
+    outcome = _run(session.setup(), log)
+    res = outcome.result
+    with open(outcome.files["forces"]) as fh:
+        f = json.load(fh)
+    n = len(res.body.t)
+    arr = lambda a: np.array([np.nan if v is None else v for v in a], float)
+    pairs = lambda a: arr(a).reshape(-1, 2)
+    assert f["version"] == 1 and f["frame_size"] == [sf.W, sf.H] and f["facing"] == 1
+    assert f["reported"] == ["elbow", "shoulder"]
+    assert f["joints"] == ["elbow", "shoulder", "hip", "knee", "ankle"]
+    assert len(f["t"]) == len(f["tension"]) == len(f["cop_x"]) == n
+    assert all(len(v) == 2 * n for v in [*f["points"].values(), *f["passed"].values(), f["floor"]])
+    # In the video's pixels: the model's points sit on the athlete, the floor under the ankle
+    truth = session.points_at(arr(f["t"]))
+    to_px = lambda m: np.stack([sf.ORIGIN[0] + m[..., 0] * sf.SCALE,
+                                sf.ORIGIN[1] - m[..., 1] * sf.SCALE], -1)
+    for name in ("elbow", "shoulder", "hip", "knee"):
+        err = np.linalg.norm(pairs(f["points"][name]) - to_px(truth[name]), axis=1)
+        assert np.nanmedian(err) < 3, (name, np.nanmedian(err))
+    assert abs(f["floor_y"] - sf.ORIGIN[1]) < 2 and f["fixed_points"]["ankle"][1] < f["floor_y"]
+    assert abs(f["px_per_m"] - sf.SCALE) < 1 and f["cord_exit"] == list(session.setup().calibration.cord_exit)
+    # The chain adds up: the still feet take what the ankle passes on, their weight and the floor
+    feet = pairs(f["floor"]) + pairs(f["passed"]["ankle"]) + [0, f["feet"]["mass_kg"] * 9.81]
+    assert np.nanmax(np.abs(feet)) < 2, np.nanmax(np.abs(feet))
+    # At peak force the arm passes the cord's pull on towards the cord exit
+    T = arr(f["tension"])
+    k = int(np.nanargmax(T))
+    to_exit = np.array(f["cord_exit"]) - pairs(f["points"]["grip"])[k]
+    for joint in ("elbow", "shoulder"):
+        v = pairs(f["passed"][joint])[k]
+        cos = np.dot(v, to_exit) / np.linalg.norm(v) / np.linalg.norm(to_exit)
+        assert cos > math.cos(math.radians(10)), (joint, v)
+    # Between drives the hips carry the upper body's weight, straight down
+    upper = sum(s["mass_kg"] for s in f["segments"]
+                if s["name"] in ("forearm_hand", "upper_arm", "head", "trunk")) * 9.81
+    hip = pairs(f["passed"]["hip"])[T == 0]
+    assert abs(np.nanmedian(hip[:, 1]) / upper - 1) < 0.1 and abs(np.nanmedian(hip[:, 0])) < 30
+    # The moments are the analysis' own, per side; the force is unknown where the analysis has none
+    fa = res.force
+    assert abs(f["moment"]["shoulder"][k] - fa.per_side("shoulder")[k]) < 0.06
+    assert all((v is None) == (not np.isfinite(t)) for v, t in zip(f["tension"], fa.tension))
+
+
+def test_without_the_setup_there_is_no_force_model():
+    _, _, log, _ = _inputs()
+    assert "forces" not in _run(None, log, out="plain").files
+
+
 def test_bad_calibration_is_flagged():
     session, _, log, _ = _inputs()
     setup = session.setup()
