@@ -361,12 +361,34 @@ full-screen-capable view: original feed | pose overlay | joint-angle panel.
     python pose_angles.py            # or: python -m pose_app.live (or pose_app)
     python pose_angles.py --help     # all options
 
+## Benchmarking pose models
+
+`tools/bench_pose.py` compares pose models on real videos before a model,
+crop or hosting change: YOLO11 against YOLO26, CPU against GPU, PyTorch
+against ONNX or OpenVINO, the full frame against a crop around the athlete,
+and every frame against every second frame. It needs no ground truth.
+
+    python tools/bench_pose.py videos/*.mp4 --device cpu
+    python tools/bench_pose.py session.mp4 \
+        --models yolo11m-pose.pt yolo26s-pose.pt yolo26m-pose.pt \
+        --reference yolo26x-pose.pt --formats pt openvino --max-seconds 90 --save-keypoints
+
+For each run it reports milliseconds per frame, the projected pose-pass time
+for a 4.5-minute piece, detection rate, keypoint noise (corrected for frame
+rate), the noise left after the force model's own filter, and agreement with
+the reference run (the largest model on every full frame). Results go to
+`bench_results/results.csv` and `results.json`; `--save-keypoints` also keeps
+each run's keypoints as `.npz`. Defaults match the worker (960 px input,
+6 Hz filter). `python tools/bench_pose.py --help` lists every option.
+
 ## Project layout
 
     pose_angles.py              live webcam app entry point
     hyrox_analyze.py            offline analysis entry point
     pm5_log.py                  PM5 Bluetooth recorder entry point
     tests/                      synthetic regression tests
+    tools/
+        bench_pose.py           pose model benchmark: speed, jitter, agreement
     pose_app/
         estimator.py            shared: PoseEstimator: YOLO -> Person records + overlay
         person.py               shared: Person dataclass
