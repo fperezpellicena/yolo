@@ -131,8 +131,6 @@ def run_analysis(video_path: str, out_dir: str, opts: Optional[AnalysisOptions] 
             raise AnalysisError("invalid_job", "Invalid force setup: " + "; ".join(problems) + ".")
         if not station.force:
             raise AnalysisError("invalid_job", f"Force analysis is not available for {station.name}.")
-        if not opts.pm5:
-            raise AnalysisError("invalid_job", "Force analysis needs the PM5 log of the piece.")
     pm5 = _load_pm5(opts.pm5) if opts.pm5 else None
     try:
         reader = VideoReader(video_path, opts.start, opts.end, opts.rotate)
@@ -164,9 +162,11 @@ def run_analysis(video_path: str, out_dir: str, opts: Optional[AnalysisOptions] 
 
     write_json(res, files["summary"])
     # The force model frame by frame, for a page to draw over the video
-    if res.force is not None:
+    # (from the video alone without a PM5 log)
+    model = res.force or res.force_geometry
+    if model is not None:
         forces = os.path.join(out_dir, OUTPUT_FILES["forces"])
-        if write_force_frames(res.force, forces, ex.fps, ex.frame_size):
+        if write_force_frames(model, forces, ex.fps, ex.frame_size):
             files["forces"] = forces
     if opts.csv:
         files["reps"] = os.path.join(out_dir, OUTPUT_FILES["reps"])

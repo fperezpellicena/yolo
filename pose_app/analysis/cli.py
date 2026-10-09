@@ -61,7 +61,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                           "(e.g. -3 when the video started 3 s before the app)")
 
     force = p.add_argument_group(
-        "force analysis (SkiErg with a PM5 log; see README, 'Force analysis')")
+        "force analysis (SkiErg with a PM5 log; without one, only the force model from the "
+        "video alone, forces.json; see README, 'Force analysis')")
     force.add_argument("--pm5", default=None, metavar="LOG",
                        help="PM5 Bluetooth log of the piece (pm5_log.py); also the machine data")
     force.add_argument("--mass", type=float, default=None, help="athlete mass, kg")

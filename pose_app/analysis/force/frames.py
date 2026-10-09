@@ -87,6 +87,9 @@ def force_frames(fa: ForceAnalysis, fps: float, frame_size) -> Optional[Dict]:
     cop_px = frame.origin[0] + frame.facing * cop * frame.scale
     return {
         "version": VERSION,
+        # "pm5": the cords' pull from the PM5 log; "geometry": the video alone, so the forces
+        # are null while the cords pull and only the geometry is known there
+        "mode": "pm5" if fa.pm5 is not None else "geometry",
         "fps": _round(fps, 3),
         "frame_size": [int(frame_size[0]), int(frame_size[1])],
         "px_per_m": _round(frame.scale, 3),
