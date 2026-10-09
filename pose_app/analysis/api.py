@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .force import ForceSetup, force_drift_rules, force_rules
+from .force.frames import write_force_frames
 from .pipeline import AnalysisResult, EmptyClipError, Extraction, analyze, extract
 from .report import write_csv, write_html, write_json
 from .stations import STATIONS
@@ -27,6 +28,7 @@ log = logging.getLogger(__name__)
 OUTPUT_FILES = {"pose_cache": "pose_cache.npz", 
                 "reps": "reps.csv", 
                 "summary": "summary.json",
+                "forces": "forces.json",
                 "report": "report.html", 
                 "video": "annotated.mp4"}
 
@@ -97,7 +99,7 @@ class AnalysisOptions:
 class AnalysisOutcome:
     result: AnalysisResult
     video: VideoInfo
-    files: Dict[str, str]           # "report", "summary", "reps", "video", "pose_cache" -> path
+    files: Dict[str, str]           # "report", "summary", "reps", "video", "pose_cache", "forces" -> path
     warnings: List[str]             # option problems first, then the analysis' own
 
 
@@ -161,6 +163,11 @@ def run_analysis(video_path: str, out_dir: str, opts: Optional[AnalysisOptions] 
              f"{sum(1 for r in res.reps if not r.faults)} clean.")
 
     write_json(res, files["summary"])
+    # The force model frame by frame, for a page to draw over the video
+    if res.force is not None:
+        forces = os.path.join(out_dir, OUTPUT_FILES["forces"])
+        if write_force_frames(res.force, forces, ex.fps, ex.frame_size):
+            files["forces"] = forces
     if opts.csv:
         files["reps"] = os.path.join(out_dir, OUTPUT_FILES["reps"])
         write_csv(res, files["reps"])

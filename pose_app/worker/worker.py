@@ -25,7 +25,10 @@ SCRATCH_PREFIX = ".analysis-tmp-"       # work folder inside the output folder w
 # Outputs moved next to the uploads, by their names in AnalysisOutcome.files and
 # in the web app. The summary is not among them: it is sent as the report, and
 # the web app stores it once it has checked it.
-KEPT_OUTPUTS = {"video": "annotated_video", "pose_cache": "pose_cache"}
+KEPT_OUTPUTS = {"video": "annotated_video", "pose_cache": "pose_cache", "forces": "force_frames"}
+# Outputs that belong to one run's results: a run that does not write one removes the last
+# run's, so the folder never pairs new results with an old file
+RUN_OUTPUTS = ("forces",)
 
 
 class JobLost(Exception):
@@ -177,6 +180,10 @@ class Worker:
                     file_name = os.path.basename(outcome.files[name])
                     os.replace(outcome.files[name], os.path.join(out_dir, file_name))
                     outputs[key] = posixpath.join(job.output_dir, file_name)
+                elif name in RUN_OUTPUTS:
+                    stale = os.path.join(out_dir, OUTPUT_FILES[name])
+                    if os.path.exists(stale):
+                        os.remove(stale)
         finally:
             shutil.rmtree(work, ignore_errors=True)
         return outputs, self._result(outcome), report
