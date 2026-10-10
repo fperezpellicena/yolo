@@ -9,7 +9,7 @@ import numpy as np
 
 from .cameras import Camera, open_camera
 from .config import Settings
-from ..estimator import PoseEstimator
+from ..estimator import load_estimator
 from .fps import FpsMeter
 from .recorder import Recorder
 from ..skeleton import empty_angles
@@ -27,8 +27,8 @@ ESC = "\x1b"
 class PoseApp:
     def __init__(self, settings: Settings, camera: Camera):
         self.settings = settings
-        self.estimator = PoseEstimator(settings.model, settings.conf, settings.imgsz,
-                                       settings.infer_device, settings.kpt_conf)
+        self.estimator = load_estimator(settings.model, settings.conf, settings.imgsz,
+                                        settings.infer_device, settings.kpt_conf)
         self.cap = open_camera(camera, settings.capture_size)
         self.display = Display(WINDOW_NAME, settings.window_size, settings.fullscreen)
         self.recorder = Recorder(settings.record_path, settings.record_size) \

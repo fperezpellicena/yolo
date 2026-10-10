@@ -1,4 +1,7 @@
-"""YOLO pose inference, turned into Person records plus a skeleton overlay."""
+"""Pose inference, turned into Person records plus a skeleton overlay.
+
+PoseEstimator runs Ultralytics YOLO pose models; load_estimator() picks it or the
+rtmlib backend (pose_app.rtm_estimator) from the model name."""
 
 from typing import List, Optional, Tuple
 
@@ -6,6 +9,16 @@ import numpy as np
 
 from .geometry import compute_angles
 from .person import Person
+
+
+def load_estimator(model: str, conf: float, imgsz: int, device: Optional[str],
+                   min_keypoint_score: float):
+    """The estimator for `model`: an rtmlib RTMPose model (rtmpose, rtmpose-s/-m/-x)
+    or anything else Ultralytics can load (yolo11m-pose.pt, a path, ...)."""
+    from .rtm_estimator import RtmPoseEstimator, is_rtm_model
+    if is_rtm_model(model):
+        return RtmPoseEstimator(model, conf, imgsz, device, min_keypoint_score)
+    return PoseEstimator(model, conf, imgsz, device, min_keypoint_score)
 
 
 class PoseEstimator:
