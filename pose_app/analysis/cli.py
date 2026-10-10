@@ -81,7 +81,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 
     model = p.add_argument_group("model")
     model.add_argument("--model", default="yolo11m-pose.pt",
-                       help="pose weights; offline favours accuracy (default: yolo11m-pose.pt)")
+                       help="pose weights; offline favours accuracy (default: yolo11m-pose.pt). "
+                            "rtmpose-s/-m/-x use RTMPose through rtmlib")
     model.add_argument("--imgsz", type=int, default=960, help="inference size (default: 960)")
     model.add_argument("--conf", type=float, default=0.4)
     model.add_argument("--kpt-conf", type=float, default=0.5)

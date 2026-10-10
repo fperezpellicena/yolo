@@ -115,7 +115,7 @@ def run_analysis(video_path: str, out_dir: str, opts: Optional[AnalysisOptions] 
                  estimator=None, on_progress: Optional[ProgressFn] = None) -> AnalysisOutcome:
     """Analyse `video_path` and write report, CSV, JSON, video and pose cache to `out_dir`.
 
-    `estimator` is a loaded PoseEstimator (anything with `.detect(frame)`) so a
+    `estimator` is a loaded estimator (anything with `.detect(frame)`) so a
     long-lived caller loads the model once; when omitted one is built from
     `opts`. Its settings must then match `opts.model` and `opts.kpt_conf`.
     """
@@ -255,8 +255,8 @@ def _extraction(reader: VideoReader, opts: AnalysisOptions, cache: str, estimato
             log.info("Not reusing the previous pose pass: made with another " +
                      ", ".join(changed) + ".")
     if estimator is None:
-        from ..estimator import PoseEstimator
-        estimator = PoseEstimator(opts.model, opts.conf, opts.imgsz, opts.device, opts.kpt_conf)
+        from ..estimator import load_estimator
+        estimator = load_estimator(opts.model, opts.conf, opts.imgsz, opts.device, opts.kpt_conf)
     info = reader.info
     tracker = AthleteTracker(opts.athlete, opts.athlete_point, (info.width, info.height))
     try:

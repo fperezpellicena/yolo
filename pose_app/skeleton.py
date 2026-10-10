@@ -1,5 +1,5 @@
-"""COCO-17 keypoint layout (used by all Ultralytics pose models) and the joint
-angles derived from it."""
+"""COCO-17 keypoint layout (Ultralytics pose models; the first 17 points of the
+Halpe-26 RTMPose models) and the joint angles derived from it."""
 
 from typing import Dict, Optional, Tuple
 
@@ -10,6 +10,16 @@ KEYPOINT_NAMES: Tuple[str, ...] = (
     "left_knee", "right_knee", "left_ankle", "right_ankle",
 )
 KP: Dict[str, int] = {name: i for i, name in enumerate(KEYPOINT_NAMES)}
+
+# The limbs drawn as a skeleton (torso, arms, legs).
+EDGES: Tuple[Tuple[str, str], ...] = (
+    ("left_shoulder", "right_shoulder"), ("left_hip", "right_hip"),
+    ("left_shoulder", "left_hip"), ("right_shoulder", "right_hip"),
+    ("left_shoulder", "left_elbow"), ("left_elbow", "left_wrist"),
+    ("right_shoulder", "right_elbow"), ("right_elbow", "right_wrist"),
+    ("left_hip", "left_knee"), ("left_knee", "left_ankle"),
+    ("right_hip", "right_knee"), ("right_knee", "right_ankle"),
+)
 
 # (label, point A, vertex B, point C) -> angle ABC, measured at the vertex.
 # Add a row here to track a new angle; the rest of the app picks it up.

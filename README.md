@@ -65,6 +65,33 @@ If other people are in shot, the largest person is followed by default; use
 defaults favour accuracy (`yolo11m-pose.pt`, `--imgsz 960`); on a CPU-only
 machine use `--model yolo11s-pose.pt --imgsz 640` for speed.
 
+### RTMPose instead of Ultralytics (trial)
+
+`--model rtmpose-s`, `rtmpose-m` (or `rtmpose`) and `rtmpose-x` run RTMPose
+through [rtmlib](https://github.com/Tau-J/rtmlib), on ONNX Runtime and without
+mmcv/mmpose: `pip install -r requirements-rtm.txt`. The same names work for the
+live app and as `WORKER_MODEL`. rtmlib downloads the models on first use.
+
+| name | detector | pose model | speed |
+|---|---|---|---|
+| `rtmpose-s` | YOLOX-tiny 416 | RTMPose-s 256x192 | fastest |
+| `rtmpose-m` | YOLOX-m 640 | RTMPose-m 256x192 | balanced |
+| `rtmpose-x` | YOLOX-x 640 | RTMPose-x 384x288 | most accurate |
+
+* The models are Halpe-26 (body with feet). Only their first 17 points, the
+  COCO-17 points the rest of the app uses, are kept for now; heels and toes
+  are dropped.
+* `--imgsz` does not apply: each model has a fixed input size.
+* `--conf` is the detector's person score.
+* Keypoint scores are RTMPose's SimCC responses, not the same scale as
+  YOLO's. `--kpt-conf 0.5` may be stricter or looser than with YOLO; compare
+  the share of frames kept before trusting the comparison (rtmlib's own
+  examples use about 0.3 to 0.45).
+* `--infer-device`: empty picks CUDA when ONNX Runtime has it, else the CPU;
+  `0` means `cuda:0`; `mps` uses Core ML.
+* The model name is part of the pose cache, so switching backends re-runs
+  the pose pass instead of reusing the other model's keypoints.
+
 
 ### Force analysis (SkiErg with a Concept2 PM5)
 
@@ -350,7 +377,8 @@ seek the player straight to a rep or a fault.
 
 Regression tests (no model needed): `python tests/test_skierg.py`,
 `python tests/test_telemetry.py`, `python tests/test_api.py`,
-`python tests/test_pm5.py`, `python tests/test_force.py` (a synthetic athlete
+`python tests/test_pm5.py`, `python tests/test_estimator.py` (the rtmlib
+backend, against a stand-in rtmlib), `python tests/test_force.py` (a synthetic athlete
 with known physics and its PM5 log; see `tests/synthetic_force.py`) and
 `python tests/test_worker.py` (against an in-memory fake of the web app's API).
 
@@ -369,6 +397,7 @@ full-screen-capable view: original feed | pose overlay | joint-angle panel.
     tests/                      synthetic regression tests
     pose_app/
         estimator.py            shared: PoseEstimator: YOLO -> Person records + overlay
+        rtm_estimator.py        shared: the same through rtmlib (RTMPose, ONNX)
         person.py               shared: Person dataclass
         skeleton.py             shared: COCO-17 keypoints and ANGLE_DEFS
         geometry.py             shared: angle maths
