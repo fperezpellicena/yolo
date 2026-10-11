@@ -2,14 +2,14 @@
 
 Efficient pattern the rules look for:
   * Tall catch with long, nearly straight arms.
-  * Pull initiated by hinging the hips; the elbow angle stays locked for the
-    first part of the drive (lats and trunk move the handles, not the biceps).
+  * Pull initiated by hinging the hips: the hips start moving before the elbows
+    bend (lats and trunk move the handles first, not the biceps).
   * Hip-dominant hinge with a soft knee, not a squat.
   * Hands finish at or past the hips.
   * Recovery at least as long as the drive (breathe, reset, re-load).
 """
 
-from typing import Dict, List
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -17,6 +17,66 @@ from ..body import BodySeries
 from ..rules import DriftRule, Rule
 from ..signal import Cycle
 from .base import ChartSpec, Station
+
+# A joint "starts" moving when it has covered this share of its range in the drive.
+ONSET = 0.25
+# Below these ranges (degrees) a joint barely moves and its timing means nothing.
+MIN_HIP_RANGE, MIN_ELBOW_RANGE = 10.0, 10.0
+# Elbows starting this much before the hips is an early arm pull (provisional).
+ARM_LEAD_MS = 40.0
+
+
+def _crossing(t: np.ndarray, x: np.ndarray, a: int, b: int,
+              level: float) -> Tuple[float, Optional[int]]:
+    """When `x` first falls to `level` in frames [a, b]: (seconds, interpolated between
+    frames so 25 fps timing is not stuck on 40 ms steps; first frame at or below)."""
+    for i in range(a, b + 1):
+        if np.isfinite(x[i]) and x[i] <= level:
+            if i > a and np.isfinite(x[i - 1]) and x[i - 1] > level:
+                f = (x[i - 1] - level) / (x[i - 1] - x[i])
+                return float(t[i - 1] + f * (t[i] - t[i - 1])), i
+            return float(t[i]), i
+    return float("nan"), None
+
+
+def arm_timing(t: np.ndarray, hip: np.ndarray, elbow: np.ndarray, s: int,
+               hip_end: int, elbow_end: int) -> Dict[str, float]:
+    """When the elbows start bending compared with the hips, over one drive.
+
+    arm_lead_ms: how long before the hips the elbows start (each joint's start being
+        ONSET of its range); positive = arms first, negative = hips first.
+    arm_bend_at_half_hinge: share of the drive's elbow bend done by the time the hips
+        are halfway through their hinge, in percent.
+    hip_onset: frame where the hips start (shows the arms already bent when they lead).
+    Ranges: hip from the catch to its lowest by `hip_end`, elbow to its most bent by
+    `elbow_end`. NaN when either joint barely moves.
+    """
+    nan = float("nan")
+    out = {"arm_lead_ms": nan, "arm_bend_at_half_hinge": nan, "hip_onset": s}
+    h0, e0 = hip[s], elbow[s]
+    if not (np.isfinite(h0) and np.isfinite(e0)):
+        return out
+    hip_win, elb_win = hip[s:hip_end + 1], elbow[s:elbow_end + 1]
+    if not (np.isfinite(hip_win).any() and np.isfinite(elb_win).any()):
+        return out
+    h_low = s + int(np.nanargmin(hip_win))
+    e_low = s + int(np.nanargmin(elb_win))
+    h_range, e_range = h0 - hip[h_low], e0 - elbow[e_low]
+    if h_range < MIN_HIP_RANGE or e_range < MIN_ELBOW_RANGE:
+        return out
+    t_hip, i_hip = _crossing(t, hip, s, h_low, h0 - ONSET * h_range)
+    t_elb, _ = _crossing(t, elbow, s, e_low, e0 - ONSET * e_range)
+    t_half, _ = _crossing(t, hip, s, h_low, h0 - 0.5 * h_range)
+    if np.isfinite(t_hip) and np.isfinite(t_elb):
+        out["arm_lead_ms"] = (t_hip - t_elb) * 1000.0
+    if np.isfinite(t_half):
+        seg = slice(s, e_low + 1)
+        ok = np.isfinite(elbow[seg])
+        e_half = np.interp(t_half, t[seg][ok], elbow[seg][ok])
+        out["arm_bend_at_half_hinge"] = 100.0 * (e0 - e_half) / e_range
+    if i_hip is not None:
+        out["hip_onset"] = i_hip
+    return out
 
 
 class SkiErg(Station):
@@ -36,7 +96,7 @@ class SkiErg(Station):
     )
     charts = (
         ChartSpec("rate_spm", "Stroke rate", "spm"),
-        ChartSpec("elbow_drop_early", "Elbow bend in first half of pull", "°"),
+        ChartSpec("arm_lead_ms", "Arms ahead of the hips (- = hips first)", "ms"),
         ChartSpec("hip_min", "Hip angle at bottom", "°"),
         ChartSpec("knee_min", "Knee angle at bottom", "°"),
         ChartSpec("wrist_bottom", "Hand height at finish", "torso lengths"),
@@ -44,11 +104,11 @@ class SkiErg(Station):
 
     def rules(self) -> List[Rule]:
         return [
-            Rule("early_arm_pull", "elbow_drop_early", ">", 35, "major",
+            Rule("early_arm_pull", "arm_lead_ms", ">", ARM_LEAD_MS, "major",
                  "Arms pull before the hips",
-                 "Keep the elbow angle locked for the first half of the pull and "
-                 "start it by driving the hips back and down; the arms finish the stroke.",
-                 "frame_early"),
+                 "Start each pull by driving the hips back and down; let the elbows "
+                 "bend once the hips are moving. The arms finish the stroke.",
+                 "frame_hip_onset"),
             Rule("squat_pattern", "knee_min", "<", 110, "major",
                  "Squatting the handles down",
                  "Keep a soft knee and hinge at the hips. Power comes from the hips "
@@ -91,9 +151,9 @@ class SkiErg(Station):
             DriftRule("drift_hinge", "hip_min", "increase", 10,
                       "Hinge gets shallower when tired",
                       "Late in the set, keep driving the hips; don't let the arms take over."),
-            DriftRule("drift_arms", "elbow_drop_early", "increase", 10,
+            DriftRule("drift_arms", "arm_lead_ms", "increase", ARM_LEAD_MS,
                       "Arms take over when tired",
-                      "Re-focus on locked elbows in the first half of the pull."),
+                      "Re-focus on starting each pull with the hips, not the arms."),
             DriftRule("drift_squat", "knee_min", "decrease", 10,
                       "Knees bend more when tired",
                       "Keep the soft-knee hinge; squatting deeper burns the legs "
@@ -116,6 +176,7 @@ class SkiErg(Station):
         recovery = t[e] - t[mid]
         duration = t[e] - t[s]
         hip_flex, knee_flex = 180 - hip_min, 180 - knee_min
+        timing = arm_timing(t, m["hip"], m["elbow"], s, bottom_end, mid)
         idx = body.frame_index
         return {
             "t_start": float(t[s]),
@@ -126,6 +187,8 @@ class SkiErg(Station):
             "recovery_ratio": recovery / drive if drive > 0 else np.nan,
             "elbow_catch": elbow_catch,
             "elbow_drop_early": elbow_catch - elbow_early_min,
+            "arm_lead_ms": timing["arm_lead_ms"],
+            "arm_bend_at_half_hinge": timing["arm_bend_at_half_hinge"],
             "hip_min": hip_min,
             "knee_min": knee_min,
             "hinge_ratio": hip_flex / max(knee_flex, 5.0),
@@ -134,6 +197,7 @@ class SkiErg(Station):
             "wrist_bottom": self.at(m["wrist_h"], mid),
             "frame_catch": float(idx[s]),
             "frame_early": float(idx[f_early]),
+            "frame_hip_onset": float(idx[timing["hip_onset"]]),
             "frame_bottom": float(idx[f_bottom]),
             "frame_finish": float(idx[mid]),
             "frame_mid": float(idx[mid]),
