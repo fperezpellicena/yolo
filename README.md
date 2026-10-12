@@ -90,6 +90,15 @@ takes the same as JSON:
      "calibration": {"cord_exit": [612, 88],
                      "scale": {"points": [[402, 905], [398, 602]], "length_m": 1.0}}}
 
+Without `--pm5`, the setup gives the force model from the video alone:
+forces.json in `"mode": "geometry"`, and nothing else force-related (no
+`force` section, `f_*` metrics, force rules or force lines on annotated.mp4).
+The body model, the cord's line and the moment arms are geometry, so they are
+there in every frame. The cords' pull is unknown during each drive (found from
+the cord's payout), so `tension`, `passed`, `floor`, `cop_x` and `moment` are
+null there. Between drives the cords are slack, and those forces follow from
+gravity and the body's motion as with the PM5 log.
+
 What it adds:
 
 * annotated.mp4: while the cords pull, the cord force as an arrow at the hands,
@@ -322,7 +331,8 @@ analysed frame's pixels (the uploaded video as displayed: x right, y down),
 forces in newtons in the same directions, both sides of the body together;
 pairs are flattened `[x0, y0, x1, y1, ...]` and a missing value is null.
 
-* Once: `version` (1), `fps`, `frame_size`, `px_per_m`, `facing`, `mass_kg`,
+* Once: `version` (1), `mode` (`pm5`, or `geometry` without the PM5 log: see
+  above), `fps`, `frame_size`, `px_per_m`, `facing`, `mass_kg`,
   `weight_n`, `cord_exit`, `floor_y`, `fixed_points` (ankle, heel and toe: the
   feet are flat and still in the model), `feet` (mass and centre of mass),
   `segments` (name, the points it joins, its mass, its centre of mass as a
