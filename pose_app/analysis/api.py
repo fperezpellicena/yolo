@@ -166,7 +166,8 @@ def run_analysis(video_path: str, out_dir: str, opts: Optional[AnalysisOptions] 
     model = res.force or res.force_geometry
     if model is not None:
         forces = os.path.join(out_dir, OUTPUT_FILES["forces"])
-        if write_force_frames(model, forces, ex.fps, ex.frame_size):
+        if write_force_frames(model, forces, ex.fps, ex.frame_size,
+                              [r.cycle for r in res.reps]):
             files["forces"] = forces
     if opts.csv:
         files["reps"] = os.path.join(out_dir, OUTPUT_FILES["reps"])

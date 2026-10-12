@@ -347,6 +347,17 @@ pairs are flattened `[x0, y0, x1, y1, ...]` and a missing value is null.
   the floor), `floor` (the floor's force on the feet) and `cop_x` (where it
   acts on the floor line), and `moment` (per side, positive as the first of
   `moment_names`).
+* Also per frame, the geometry of the pull: `arm` (the shoulder's and the
+  elbow's distance to the cord's line, cm) and `com_height` (the body's centre
+  of mass above the floor, cm). Both are known without the PM5 log.
+* `strokes`: each stroke as `[first, last]` sample, catch to catch.
+* `typical`: every series through the typical stroke, for a chart of it.
+  `x` runs from 0 to 100% of the stroke in 51 points; for each series
+  (the five joints' moments, `tension`, `floor` (its size), `arm_shoulder`,
+  `arm_elbow`, `com_height`) it gives the `median` and the middle half of the
+  strokes (`low` and `high`: the 25th and 75th percentiles). A point is null
+  when fewer than three strokes have a value there, as for the forces during
+  the drive without the PM5 log.
 
 The hip, knee and ankle values and the floor reaction are estimates, as in
 the report: one side-on camera does not measure them well enough until a
