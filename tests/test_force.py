@@ -275,6 +275,23 @@ def test_the_force_model_goes_frame_by_frame_into_forces_json():
     fa = res.force
     assert abs(f["moment"]["shoulder"][k] - fa.per_side("shoulder")[k]) < 0.06
     assert all((v is None) == (not np.isfinite(t)) for v, t in zip(f["tension"], fa.tension))
+    # The geometry of the pull: the shoulder's distance to the cord's line, the centre of mass's height
+    from pose_app.analysis.force.dynamics import moment_arm
+    arm = 100 * moment_arm(fa.kin.points["shoulder"], fa.kin.points["grip"], fa.cord_dir)
+    assert np.nanmax(np.abs(arr(f["arm"]["shoulder"]) - arm)) < 0.06
+    assert np.nanmax(np.abs(arr(f["com_height"]) - 100 * fa.kin.body_com[:, 1])) < 0.06
+    # The typical stroke, catch to catch, over every stroke of the analysis
+    assert f["strokes"] == [[r.cycle.start, r.cycle.end] for r in res.reps]
+    typical = f["typical"]
+    assert typical["x"][0] == 0 and typical["x"][-1] == 100 and len(typical["x"]) == 51
+    assert typical["strokes"] == len(res.reps)
+    pull = arr(typical["series"]["tension"]["median"])
+    assert 5 < typical["x"][int(np.nanargmax(pull))] < 45, pull     # the drive opens the stroke
+    assert np.nanmax(pull[30:]) < 0.05 * np.nanmax(pull)            # slack in the recovery
+    for name, band in typical["series"].items():
+        lo, mid, hi = (arr(band[k]) for k in ("low", "median", "high"))
+        assert np.isfinite(mid).all(), name                         # the PM5 knows every point
+        assert (lo <= mid + 0.11).all() and (mid <= hi + 0.11).all(), name
 
 
 def test_without_the_setup_there_is_no_force_model():
@@ -315,6 +332,13 @@ def test_without_the_pm5_log_the_force_model_is_geometry():
         for a, b in ((f["floor"], p["floor"]), (f["passed"]["hip"], p["passed"]["hip"])):
             assert abs(a[2 * k] - b[2 * k]) <= 1 and abs(a[2 * k + 1] - b[2 * k + 1]) <= 1, k
         assert abs(f["moment"]["shoulder"][k] - p["moment"]["shoulder"][k]) <= 0.1, k
+    # The geometry is the same; the typical stroke knows the moments only in the recovery
+    assert f["arm"] == p["arm"] and f["com_height"] == p["com_height"]
+    series = f["typical"]["series"]
+    assert series["arm_shoulder"] == p["typical"]["series"]["arm_shoulder"]
+    x = f["typical"]["x"]
+    assert series["shoulder"]["median"][x.index(20)] is None        # mid-drive
+    assert series["shoulder"]["median"][x.index(70)] is not None    # recovery
 
 
 def test_bad_calibration_is_flagged():
