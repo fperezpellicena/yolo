@@ -243,8 +243,10 @@ class Session:
         `feet`: {"heel": h, "toe": t} as fractions of HEIGHT behind / ahead of the ankle on the
         floor, for a body-with-feet model: the keypoints are then 26 wide (Halpe-26).
         `drift`: (dx, dy) px the whole picture has moved by the end of the clip, linearly.
-        `heel_lift`: {"strokes": [k, ...], "height_m": m}: the heel rises that far late in the
-        recovery of those strokes (before the next catch), the toes staying down.
+        `heel_lift`: {"strokes": [k, ...], "height_m": m, "at": phase, "width": w}: the heel rises
+        that far at that phase of those strokes, the toes staying down, up and down again within
+        `w` of a stroke either side (default 0.08). The default phase, 0.9, is late in the
+        recovery, before the next catch; DRIVE is the finish.
         `step`: {"stroke": k, "back_m": m}: the athlete starts that far forward and steps back
         into place during stroke k (the whole body moves).
         `seed`: noise of its own, leaving the session's noise sequence where it was."""
@@ -286,8 +288,9 @@ class Session:
         toe = np.tile([ORIGIN[0] + feet["toe"] * HEIGHT * SCALE, ORIGIN[1]], (n, 1))
         if heel_lift:
             ph = self.phase_at(t)
+            at, width = heel_lift.get("at", 0.9), heel_lift.get("width", 0.08)
             for k in heel_lift["strokes"]:
-                u = np.clip((ph - (k + 0.9)) / 0.08, -1, 1)            # late recovery of stroke k
+                u = np.clip((ph - (k + at)) / width, -1, 1)
                 heel[:, 1] -= heel_lift["height_m"] * SCALE * 0.5 * (1 + np.cos(np.pi * u))
         for side, dx in (("left", 0.0), ("right", 4.0)):
             kp[:, KP[f"{side}_heel"]] = heel + [dx, -2 if dx else 0]

@@ -15,7 +15,8 @@ was clicked, and the motion is put back (`unsteady`) to draw over the video.
 
 With a body-with-feet model (Halpe-26) the near heel and big toe are tracked
 too: they give the athlete's own ankle height, heel and toe (`foot_geometry`)
-in place of fractions of stature, and show when the heel leaves the floor.
+in place of fractions of stature. When the heel leaves the floor is the
+technique analysis' (analysis/feet.py), which the force model reuses.
 """
 
 from dataclasses import dataclass
@@ -24,6 +25,7 @@ from typing import Dict, Optional, Sequence, Tuple
 import numpy as np
 
 from ...skeleton import KP
+from ..camera import steady, unsteady  # noqa: F401  (part of this module's interface)
 from ..signal import fill_gaps
 from .model import ANKLE_H, SEGMENT_H, SEGMENTS, BodyModel
 from .setup import AthleteProfile, Calibration
@@ -127,16 +129,6 @@ def camera_matrices(camera: Optional[np.ndarray], n: int, fps: float) -> np.ndar
     return out @ np.linalg.inv(out[0])            # the first frame exactly as it was clicked
 
 
-def unsteady(m: np.ndarray, xy: np.ndarray) -> np.ndarray:
-    """First-frame pixels (N, 2) -> where they show in each frame (m from camera_matrices)."""
-    return np.einsum("nij,nj->ni", m[:, :2, :2], xy) + m[:, :2, 2]
-
-
-def steady(m: np.ndarray, xy: np.ndarray) -> np.ndarray:
-    """Each frame's pixels (N, 2) -> the first frame's camera."""
-    return unsteady(np.linalg.inv(m), xy)
-
-
 def moved_by(m: np.ndarray, point) -> float:
     """How far (px) a still point of the first frame wanders in the video at most."""
     p = np.tile(np.asarray(point, float), (len(m), 1))
@@ -176,18 +168,6 @@ def foot_geometry(tracks: Dict[str, np.ndarray], facing: int) -> Optional[Dict[s
             "heel": float(np.median(facing * (a[:, 0] - h[:, 0]))),
             "toe": float(np.median(facing * (k[:, 0] - a[:, 0]))),
             "share": float(ok.mean())}
-
-
-def heel_lift(tracks: Dict[str, np.ndarray], scale: float) -> np.ndarray:
-    """(N,) m: how far the heel stands above the toe, beyond its usual (flat) height.
-    Measured within each frame, so the camera's motion cancels. NaN without the feet."""
-    h, k = tracks.get("heel"), tracks.get("big_toe")
-    if h is None or k is None:
-        return np.full(len(next(iter(tracks.values()))), np.nan)
-    rise = k[:, 1] - h[:, 1]                          # + : the heel above the toe
-    if not np.isfinite(rise).any():
-        return rise
-    return (rise - np.nanmedian(rise)) / scale
 
 
 def _median_length(a: np.ndarray, b: np.ndarray) -> float:

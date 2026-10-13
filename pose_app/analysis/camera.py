@@ -97,6 +97,17 @@ class CameraTracker:
         return out
 
 
+def unsteady(m: np.ndarray, xy: np.ndarray) -> np.ndarray:
+    """First-frame pixels (N, 2) -> where they show in each frame. `m` (N, 3, 3) takes
+    first-frame pixels to each frame's (force.kinematics.camera_matrices)."""
+    return np.einsum("nij,nj->ni", m[:, :2, :2], xy) + m[:, :2, 2]
+
+
+def steady(m: np.ndarray, xy: np.ndarray) -> np.ndarray:
+    """Each frame's pixels (N, 2) -> the first frame's camera."""
+    return unsteady(np.linalg.inv(m), xy)
+
+
 def measure_camera(frames: Iterable[np.ndarray], boxes: np.ndarray, fps: float) -> np.ndarray:
     """The camera's motion over `frames` (in order, one per row of `boxes`): (N, 2, 3)."""
     tracker = CameraTracker(fps)

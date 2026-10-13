@@ -43,9 +43,11 @@ def write_csv(res: AnalysisResult, path: str) -> None:
 
 
 def chart_specs(res: AnalysisResult) -> List[ChartSpec]:
-    """Per-rep metrics worth charting: the station's, plus machine output when synced, plus
-    the force measures when the force analysis ran."""
-    specs = list(res.station.charts)
+    """Per-rep metrics worth charting: the station's that were measured (the feet need a
+    body-with-feet model), plus machine output when synced, plus the force measures when the
+    force analysis ran."""
+    specs = [c for c in res.station.charts
+             if any(math.isfinite(r.metrics.get(c.metric, math.nan)) for r in res.reps)]
     if res.machine is not None and res.machine.alignment.ok:
         specs += MACHINE_CHARTS
     if res.force is not None and res.force.strokes:
@@ -105,7 +107,9 @@ def summary_dict(res: AnalysisResult) -> Dict:
         "rules": [{"id": r.id, "title": r.title, "severity": r.severity, "metric": r.metric,
                    "op": r.op, "threshold": res.thresholds[r.id], "cue": r.cue}
                   for r in rules.values()],
-        "charts": [{"metric": c.metric, "label": c.label, "unit": c.unit}
+        "charts": [{"metric": c.metric, "label": c.label, "unit": c.unit,
+                    "reference": ({"value": c.reference[0], "label": c.reference[1]}
+                                  if c.reference else None)}
                    for c in chart_specs(res)],
         "examples": [{"rep": r.number, **_fault_dict(f, clock)} for r, f in worst_faults(res)],
         "drift": [{"rule": d.rule_id, "title": d.title, "metric": d.metric,
@@ -247,14 +251,16 @@ def write_json(res: AnalysisResult, path: str) -> None:
 
 # ------------------------------------------------------------------ HTML
 
-def _chart_svg(res: AnalysisResult, metric: str, label: str, unit: str) -> str:
+def _chart_svg(res: AnalysisResult, metric: str, label: str, unit: str,
+               reference: Optional[Tuple[float, str]] = None) -> str:
     pts = [(r.number, r.metrics.get(metric, math.nan)) for r in res.reps]
     pts = [(x, y) for x, y in pts if math.isfinite(y)]
     if len(pts) < 2:
         return ""
     rules = [r for r in res.rule_list() if r.metric == metric]
     flagged = {r.number for r in res.reps for f in r.faults if f.metric == metric}
-    ys = [y for _, y in pts] + [res.thresholds[r.id] for r in rules]
+    ys = [y for _, y in pts] + [res.thresholds[r.id] for r in rules] + \
+        ([reference[0]] if reference else [])
     lo, hi = min(ys), max(ys)
     pad = (hi - lo) * 0.1 or 1.0
     lo, hi = lo - pad, hi + pad
@@ -276,6 +282,11 @@ def _chart_svg(res: AnalysisResult, metric: str, label: str, unit: str) -> str:
         parts.append(f'<line class="thr" x1="{L}" x2="{W-R}" y1="{y:.1f}" y2="{y:.1f}"/>'
                      f'<text class="ax thr-t" x="{W-R}" y="{y-4:.1f}" text-anchor="end">'
                      f'{html.escape(r.title)}</text>')
+    if reference:
+        y = sy(reference[0])
+        parts.append(f'<line class="ref" x1="{L}" x2="{W-R}" y1="{y:.1f}" y2="{y:.1f}"/>'
+                     f'<text class="ax" x="{W-R}" y="{y-4:.1f}" text-anchor="end">'
+                     f'{html.escape(reference[1])}</text>')
     path = " ".join(f"{'M' if i == 0 else 'L'}{sx(x):.1f},{sy(y):.1f}" for i, (x, y) in enumerate(pts))
     parts.append(f'<path class="series" d="{path}"/>')
     for x, y in pts:
@@ -321,7 +332,7 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:7px 8px;
 .warn{border-left:4px solid var(--warn);padding:8px 12px;margin:8px 0;background:rgba(224,138,0,.08)}
 svg{width:100%;height:auto}.grid{stroke:var(--line)}.ax{fill:var(--mut);font-size:11px}
 .series{fill:none;stroke:var(--acc);stroke-width:2}.pt{fill:var(--acc)}.pt.bad{fill:var(--bad)}
-.thr{stroke:var(--bad);stroke-dasharray:5 4;opacity:.7}.thr-t{fill:var(--bad)}
+.thr{stroke:var(--bad);stroke-dasharray:5 4;opacity:.7}.ref{stroke:var(--mut);stroke-dasharray:2 4}.thr-t{fill:var(--bad)}
 .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px}
 .card{margin:0;border:1px solid var(--line);border-radius:10px;overflow:hidden}.card img{width:100%;display:block}
 .card figcaption{padding:10px 12px;font-size:14px}
@@ -571,7 +582,7 @@ def write_html(res: AnalysisResult, path: str, reader: Optional[VideoReader] = N
     ) or '<tr><td colspan="4" class="mut">Not enough reps to compare early and late.</td></tr>'
     specs = chart_specs(res)
     charts = "".join(f"<h3>{esc(c.label)}{f' ({esc(c.unit)})' if c.unit else ''}</h3>"
-                     f"{_chart_svg(res, c.metric, c.label, c.unit)}" for c in specs)
+                     f"{_chart_svg(res, c.metric, c.label, c.unit, c.reference)}" for c in specs)
     cols = [c.metric for c in specs]
     per_rep = "".join(
         f'<tr><td>{r.number}</td><td>{r.metrics["t_start"]:.1f}</td>'

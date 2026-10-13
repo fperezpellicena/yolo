@@ -1,8 +1,9 @@
 """Pass 1 (pose extraction, cacheable) and the analysis that runs on it."""
 
 import json
+import math
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -12,7 +13,8 @@ from ..pm5 import Pm5Session
 from .body import BodySeries, build_body_series
 from .camera import CameraTracker
 from .force import (ForceAnalysis, ForceSetup, StrokeSync, analyze_force, analyze_geometry,
-                    attach_force, force_drift_rules, force_rules, sync_by_hands)
+                    attach_force, force_drift_rules, force_rules, note_heel_lifts, sync_by_hands)
+from .force.kinematics import camera_matrices
 from .rules import Drift, Fault, Rule, apply_overrides, evaluate_drift
 from .signal import Cycle, find_cycles, hysteresis_thresholds
 from .stations import Station
@@ -164,13 +166,18 @@ def analyze(ex: Extraction, station: Station, min_score: float = 0.5,
     a station that supports it) it also drives the force analysis.
     """
     overrides = overrides or {}
-    body = build_body_series(ex.t, ex.frame_index, ex.keypoints, ex.scores, min_score, ex.fps)
+    height = force_setup.athlete.height_m if force_setup is not None else None
+    body = build_body_series(ex.t, ex.frame_index, ex.keypoints, ex.scores, min_score, ex.fps,
+                             height)
+    if ex.camera is not None:                     # measured in the pose pass (camera.py)
+        body.camera = camera_matrices(ex.camera, len(ex.t), ex.fps)
     driver = body.metrics[station.driver]
     lo, hi = hysteresis_thresholds(driver, station.lo_frac, station.hi_frac)
     cycles = find_cycles(driver, body.t, lo, hi, station.min_rep_s, station.max_rep_s) \
         if np.isfinite(lo) else []
 
     metrics = [station.summarize(body, cycle) for cycle in cycles]
+    notes = station.review(body, cycles, metrics)
     from_pm5 = pm5 is not None and telemetry is None
     if from_pm5:
         telemetry = clean(pm5_telemetry(pm5))
@@ -196,6 +203,7 @@ def analyze(ex: Extraction, station: Station, min_score: float = 0.5,
         attach(metrics, telemetry, alignment)
     if force is not None:
         attach_force(metrics, force)
+        note_heel_lifts(force, _heel_lifts(metrics))
 
     extra = force is not None
     rules = apply_overrides([*station.rules(), *(force_rules() if extra else [])], overrides)
@@ -212,10 +220,11 @@ def analyze(ex: Extraction, station: Station, min_score: float = 0.5,
                             rules=rules, pm5=pm5, pm5_sync=sync)
     if telemetry is not None:
         result.machine = analyze_machine(telemetry, alignment, reps, rules)
-    result.warnings = _warnings(result)
+    result.warnings = _warnings(result, notes)
     if pm5 is None and force_setup is not None and station.force:
         result.force_geometry = analyze_geometry(ex.t, ex.keypoints, ex.scores, body, cycles,
                                                  ex.fps, force_setup, min_score, ex.camera)
+        note_heel_lifts(result.force_geometry, _heel_lifts(metrics))
         result.warnings.extend(result.force_geometry.checks)
     return result
 
@@ -259,7 +268,17 @@ def _starts_from_rest(driver: np.ndarray, t: np.ndarray, cycles: List[Cycle]) ->
     return bool(opening.size >= 5 and np.ptp(opening) < 0.25 * stroke_span)
 
 
-def _warnings(res: AnalysisResult) -> List[str]:
+def _heel_lifts(metrics: List[Dict[str, float]]) -> List[float]:
+    """Each rep's highest heel lift (cm, the heel_lift* metrics), NaN where the station
+    measured or judged none."""
+    out = []
+    for m in metrics:
+        vals = [v for k, v in m.items() if k.startswith("heel_lift") and math.isfinite(v)]
+        out.append(max(vals) if vals else math.nan)
+    return out
+
+
+def _warnings(res: AnalysisResult, notes: Sequence[str] = ()) -> List[str]:
     w, body, st = [], res.body, res.station
     if body.coverage < 0.8:
         w.append(f"The athlete was measured in only {body.coverage:.0%} of frames; "
@@ -272,6 +291,7 @@ def _warnings(res: AnalysisResult) -> List[str]:
                  "with the full movement in frame?")
     elif len(res.reps) < 6:
         w.append("Fewer than 6 reps: fatigue trends need a longer clip.")
+    w.extend(notes)
     if res.machine is not None:
         al = res.machine.alignment
         if not al.ok or al.confidence == "low":

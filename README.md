@@ -80,9 +80,10 @@ live app and as `WORKER_MODEL`. rtmlib downloads the models on first use.
 
 * The models are Halpe-26 (body with feet): the COCO-17 points, then head,
   neck, mid-hip and each foot's big toe, small toe and heel. All 26 are kept
-  in the pose cache and the feet are drawn in the annotated video; the
-  analysis does not use them yet. With a 17-point model (YOLO) the extra
-  points are stored as not measured. RTMPose caches made before the feet
+  in the pose cache and the feet are drawn in the annotated video. The
+  SkiErg analysis reads the heels from them (below) and the force model the
+  athlete's own feet. With a 17-point model (YOLO) the extra points are stored
+  as not measured, and the heel metrics and charts are left out. RTMPose caches made before the feet
   were kept are re-run rather than reused (`--reuse` still takes them).
 * `--imgsz` does not apply: each model has a fixed input size.
 * `--conf` is the detector's person score.
@@ -94,6 +95,32 @@ live app and as `WORKER_MODEL`. rtmlib downloads the models on first use.
   `0` means `cuda:0`; `mps` uses Core ML.
 * The model name is part of the pose cache, so switching backends re-runs
   the pose pass instead of reusing the other model's keypoints.
+
+### Heels (SkiErg, body-with-feet models)
+
+With a 26-point model the SkiErg analysis measures how far the near heel stands
+above the big toe, beyond its usual height in the clip (heels down), in cm. Heel
+and toe are read in the same frame, so a drifting phone cancels out; the scale
+is the athlete's shank, taken as 0.246 of their height (the force setup's
+height when given, else 1.75 m: within about 10%). Per stroke:
+
+| metric | |
+|---|---|
+| `heel_lift_catch` | highest lift from halfway through the recovery before the stroke to halfway through its drive: rising onto the toes for the catch |
+| `heel_lift_finish` | highest lift from there to halfway through the stroke's recovery: tipping onto the toes at the finish |
+
+* Rule `heels_up_finish` (minor, provisional): `heel_lift_finish` over 5 cm,
+  "Heels lift at the finish". Heels up around the catch are charted against
+  the same 5 cm line but not judged: rising onto the toes to start the pull
+  higher is a style some fast athletes use, at a cost to the calves.
+* Not judged on the first and last strokes (stepping onto and off the machine)
+  nor on a stroke in which the toes moved more than 6 cm (a step, measured with
+  the camera's motion taken out); the report names those strokes.
+* On flat feet the foot points slide over the shoe as the posture changes: up
+  to 3.7 cm of apparent lift per stroke, mostly at the catch, on five real
+  clips where nobody lifted their heels mid-piece; real lifts there (stepping
+  on and off) read 6-14 cm. Hence the 5 cm line. No clip with real heel
+  raises during the strokes has been checked yet.
 
 
 ### Force analysis (SkiErg with a Concept2 PM5)
@@ -159,7 +186,6 @@ What it adds:
   | `f_shoulder_arm_cm`, `f_elbow_arm_cm` | distance from the joint to the cord's line at peak force |
   | `f_cord_work_j`, `f_energy_err` | work of the mapped curve on the video's payout; joint work vs PM5 work (%) |
   | `f_t_peak`, `frame_force_peak` | when the force peaked (video seconds / source frame) |
-  | `f_heel_lift_cm` | how far the near heel rose above its flat height in the stroke (cm; with a body-with-feet model only; not checked on the first and last strokes or a stroke with a step) |
 
   "At peak force" is a tension-weighted average over the frames above 80% of
   the stroke's peak, so a value does not hinge on one frame.
@@ -193,12 +219,11 @@ The camera and the feet:
   support.
 * Feet that move within a stroke (stepping into or out of place) are reported:
   the model takes the feet as still, so those strokes are less reliable.
-* Heels off the floor: the heel's height above the toe, beyond its usual flat
-  height, gives `f_heel_lift_cm` per stroke. 5 cm or more is reported, because
-  the model takes the feet as flat (provisional: on flat feet the foot points
-  slide by up to about 4 cm with the posture). It is a check on the model, not
-  a technique fault; whether rising onto the toes is good SkiErg technique is a
-  coaching question. Each video stroke is paired with a
+* Heels off the floor: the model takes the feet as flat, so strokes whose heel
+  metrics (Heels, above) read over 5 cm are reported as less reliable for the
+  floor force and the force capacity, and counted in `heel_lift_strokes`.
+
+Each video stroke is paired with a
 PM5 stroke by the drive ends and drive times (to 0.01 s on the PM5's own
 clock); the pairing's confidence is reported, and force is only used when it
 is clear. Curves spaced by handle travel are placed by the fraction of the cord
@@ -350,8 +375,9 @@ Everything the report shows, for the web app to draw its own
   condition (`op` + `threshold`, after overrides) and coaching cue.
   `thresholds` also lists the fatigue rules' values.
 * `faults`: how often each rule fired; `drift`: early vs late fatigue checks.
-* `charts`: which per-rep metrics to plot, with label and unit; draw each
-  rule's threshold on the chart of its metric.
+* `charts`: which per-rep metrics to plot (those measured), with label and
+  unit; draw each rule's threshold on the chart of its metric, and the
+  chart's own `reference` line ({value, label}) when it has one.
 * `examples`: for each fault type, the rep where it was worst, with the value
   and when it happened.
 * `per_rep`: every metric of every rep, its faults (rule, value, time), and
@@ -414,8 +440,8 @@ pairs are flattened `[x0, y0, x1, y1, ...]` and a missing value is null.
   the calibration was clicked): map them through frame i's to draw them on
   frame i. The per-frame positions are already in their own frame's pixels.
   `[1, 0, 0, 0, 1, 0]` for a still camera.
-* `heel_lift_cm`: per frame, the heel's height above its flat height (null
-  without a body-with-feet model).
+* `heel_lift_cm`: per frame, the heel's height above its flat height, as the
+  heel metrics read it (null without a body-with-feet model).
 * `strokes`: each stroke as `[first, last]` sample, catch to catch.
 * `typical`: every series through the typical stroke, for a chart of it.
   `x` runs from 0 to 100% of the stroke in 51 points; for each series
@@ -525,6 +551,7 @@ definitions, not only error.
             tracking.py         AthleteTracker: follow one person
             camera.py           CameraTracker: the camera's motion, from the background
             body.py             normalised body metrics for the whole clip
+            feet.py             heel lift and steps (body-with-feet models)
             signal.py           gap filling, zero-lag smoothing, rep detection
             rules.py            Rule / DriftRule: thresholds + coaching cues
             pipeline.py         pose pass (cached) + analysis

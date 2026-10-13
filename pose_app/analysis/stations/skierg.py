@@ -7,13 +7,20 @@ Efficient pattern the rules look for:
   * Hip-dominant hinge with a soft knee, not a squat.
   * Hands finish at or past the hips.
   * Recovery at least as long as the drive (breathe, reset, re-load).
+  * Heels down through the finish: weight over the middle of the feet, not
+    tipping onto the toes (body-with-feet models only).
+
+Heels around the catch are reported, not judged: rising onto the toes to start
+the pull higher is a style some fast athletes use, at a cost to the calves.
 """
 
-from typing import Dict, List, Optional, Tuple
+import math
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
 from ..body import BodySeries
+from ..feet import LIFT_CM, STEP_CM, travel_cm
 from ..rules import DriftRule, Rule
 from ..signal import Cycle
 from .base import ChartSpec, Station
@@ -24,6 +31,16 @@ ONSET = 0.25
 MIN_HIP_RANGE, MIN_ELBOW_RANGE = 10.0, 10.0
 # Elbows starting this much before the hips is an early arm pull (provisional).
 ARM_LEAD_MS = 40.0
+HEEL_KEYS = ("heel_lift_catch", "heel_lift_finish")
+
+
+def heel_windows(s: int, mid: int, e: int) -> Tuple[Tuple[int, int], Tuple[int, int]]:
+    """Frame ranges of one stroke for the heels. Catch: from halfway through the recovery
+    that leads into this stroke (taken as long as this stroke's own) to halfway through
+    the drive. Finish: from there to halfway through this stroke's recovery. Together the
+    strokes cover the set once: this stroke's late recovery is the next one's catch."""
+    half_drive, half_rec = max(1, (mid - s) // 2), max(1, (e - mid) // 2)
+    return (max(0, s - half_rec), s + half_drive), (s + half_drive + 1, mid + half_rec)
 
 
 def _crossing(t: np.ndarray, x: np.ndarray, a: int, b: int,
@@ -100,6 +117,10 @@ class SkiErg(Station):
         ChartSpec("hip_min", "Hip angle at bottom", "°"),
         ChartSpec("knee_min", "Knee angle at bottom", "°"),
         ChartSpec("wrist_bottom", "Hand height at finish", "torso lengths"),
+        # shown only when a body-with-feet model measured the feet
+        ChartSpec("heel_lift_catch", "Heels up around the catch", "cm",
+                  (LIFT_CM, "Off the floor")),
+        ChartSpec("heel_lift_finish", "Heels up at the finish", "cm"),
     )
 
     def rules(self) -> List[Rule]:
@@ -141,6 +162,11 @@ class SkiErg(Station):
                  "Recovery rushed",
                  "Pull fast, return with control: the recovery is where you breathe "
                  "and load the next stroke.", "frame_finish"),
+            Rule("heels_up_finish", "heel_lift_finish", ">", LIFT_CM, "minor",
+                 "Heels lift at the finish",
+                 "Sit the hips back as the hands come down and keep the heels on the floor: "
+                 "tipping onto the toes moves your weight forward, off the pull.",
+                 "frame_heel_finish"),
         ]
 
     def drift_rules(self) -> List[DriftRule]:
@@ -177,6 +203,9 @@ class SkiErg(Station):
         duration = t[e] - t[s]
         hip_flex, knee_flex = 180 - hip_min, 180 - knee_min
         timing = arm_timing(t, m["hip"], m["elbow"], s, bottom_end, mid)
+        catch, finish = heel_windows(s, mid, e)
+        heel_catch, f_heel_catch = self.extreme(m["heel_lift"], *catch, "max")
+        heel_finish, f_heel_finish = self.extreme(m["heel_lift"], *finish, "max")
         idx = body.frame_index
         return {
             "t_start": float(t[s]),
@@ -195,10 +224,36 @@ class SkiErg(Station):
             "trunk_max": trunk_max,
             "wrist_top": self.at(m["wrist_h"], s),
             "wrist_bottom": self.at(m["wrist_h"], mid),
+            "heel_lift_catch": heel_catch,              # cm; review() leaves some strokes out
+            "heel_lift_finish": heel_finish,
             "frame_catch": float(idx[s]),
             "frame_early": float(idx[f_early]),
             "frame_hip_onset": float(idx[timing["hip_onset"]]),
             "frame_bottom": float(idx[f_bottom]),
             "frame_finish": float(idx[mid]),
             "frame_mid": float(idx[mid]),
+            "frame_heel_catch": float(idx[min(f_heel_catch, len(idx) - 1)]),
+            "frame_heel_finish": float(idx[min(f_heel_finish, len(idx) - 1)]),
         }
+
+    def review(self, body: BodySeries, reps: Sequence[Cycle],
+               metrics: List[Dict[str, float]]) -> List[str]:
+        """Heels are not judged on the first and last strokes (stepping onto and off the
+        machine lifts them) nor on any stroke in which the toes moved (a step)."""
+        if not any(math.isfinite(m.get(k, math.nan)) for m in metrics for k in HEEL_KEYS):
+            return []
+        toe, steps = body.steady(body.near("big_toe")), []      # a moving phone is not a step
+        for k, (rep, m) in enumerate(zip(reps, metrics)):
+            catch, finish = heel_windows(rep.start, rep.mid, rep.end)
+            moved = travel_cm(toe, catch[0], finish[1], body.px_per_m)
+            stepped = math.isfinite(moved) and moved > STEP_CM
+            if stepped and 0 < k < len(reps) - 1:
+                steps.append(k + 1)
+            if stepped or k in (0, len(reps) - 1):
+                m.update(dict.fromkeys(HEEL_KEYS, math.nan))
+        if not steps:
+            return []
+        which = ", ".join(map(str, steps))
+        return [f"The feet moved (a step) during {self.rep_word}{'s' if len(steps) > 1 else ''} "
+                f"{which}, so heel lift is not judged there (nor on the first and last "
+                f"{self.rep_word}s)."]

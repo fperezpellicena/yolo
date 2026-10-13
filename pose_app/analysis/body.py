@@ -7,11 +7,13 @@ best; the far side is mostly guessed.
 """
 
 from dataclasses import dataclass, field
-from typing import Dict
+from typing import Dict, Optional
 
 import numpy as np
 
 from ..skeleton import KP
+from .camera import steady
+from .feet import heel_lift, px_per_m
 from .signal import fill_gaps, smooth
 
 SIDE_JOINTS = ("shoulder", "elbow", "wrist", "hip", "knee", "ankle")
@@ -39,12 +41,20 @@ class BodySeries:
     view_ratio: float                  # shoulder spread / torso: ~0 side-on, ~1 front-on
     coverage: float                    # fraction of frames with the athlete measured
     metrics: Dict[str, np.ndarray] = field(default_factory=dict)
+    px_per_m: float = float("nan")     # at the feet, from the shank and the athlete's height
+    # (N, 3, 3) the camera's motion, first-frame pixels -> each frame's; None if not measured
+    camera: Optional[np.ndarray] = None
 
     def point(self, name: str) -> np.ndarray:
         return self.keypoints[:, KP[name]]
 
     def near(self, joint: str) -> np.ndarray:
         return self.point(f"{self.side}_{joint}")
+
+    def steady(self, xy: np.ndarray) -> np.ndarray:
+        """(N, 2) pixels as a still camera would have seen them (the first frame's); as they
+        are when the camera's motion was not measured."""
+        return xy if self.camera is None else steady(self.camera, xy)
 
 
 def _clean_keypoints(t, kp, scores, min_score, fps) -> np.ndarray:
@@ -58,7 +68,9 @@ def _clean_keypoints(t, kp, scores, min_score, fps) -> np.ndarray:
 
 
 def build_body_series(t: np.ndarray, frame_index: np.ndarray, kp: np.ndarray,
-                      scores: np.ndarray, min_score: float, fps: float) -> BodySeries:
+                      scores: np.ndarray, min_score: float, fps: float,
+                      height_m: Optional[float] = None) -> BodySeries:
+    """`height_m`: the athlete's, when known; it only scales the centimetre metrics."""
     present = scores.max(axis=1) > 0
     side_score = {s: float(np.mean([scores[present, KP[f"{s}_{j}"]].mean()
                                     for j in SIDE_JOINTS])) if present.any() else 0.0
@@ -96,6 +108,9 @@ def build_body_series(t: np.ndarray, frame_index: np.ndarray, kp: np.ndarray,
                                        n["ankle"][:, 1] - n["knee"][:, 1]))  # 0 = vertical shin
     ls, rs = series.point("left_shoulder"), series.point("right_shoulder")
     m["shoulder_tilt"] = np.degrees(np.arctan2(rs[:, 1] - ls[:, 1], np.abs(rs[:, 0] - ls[:, 0])))
+    # cm, NaN without a body-with-feet model (feet.py)
+    series.px_per_m = px_per_m(n["knee"], n["ankle"], height_m)
+    m["heel_lift"] = heel_lift(series.near("heel"), series.near("big_toe"), series.px_per_m)
 
     series.coverage = float(np.mean(np.isfinite(m["hip"]))) if len(t) else 0.0
     return series

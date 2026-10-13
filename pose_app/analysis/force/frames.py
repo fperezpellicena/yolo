@@ -18,7 +18,7 @@ body together:
   * `feet_measured`: true when a body-with-feet model measured the athlete's
     ankle height, heel and toe (else they are fractions of stature), and
     `heel_lift_cm`: how far the heel stands above its flat height, per frame
-    (null without measured feet).
+    (null without measured feet), as the report's heel metrics read it.
   * `segments`: the model's rigid segments between those points, each with
     its mass and where its centre of mass lies (a fraction of the way from
     `from` to `to`), so a page can draw them; `body_com` is the whole body's

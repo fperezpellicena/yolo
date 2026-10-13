@@ -1,7 +1,7 @@
 """What every station analyzer provides."""
 
 from dataclasses import dataclass
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -15,6 +15,8 @@ class ChartSpec:
     metric: str
     label: str
     unit: str = ""
+    # A line to read the values against that is not a rule's threshold: (value, label)
+    reference: Optional[Tuple[float, str]] = None
 
 
 class Station:
@@ -47,6 +49,12 @@ class Station:
 
     def summarize(self, body: BodySeries, rep: Cycle) -> Dict[str, float]:
         raise NotImplementedError
+
+    def review(self, body: BodySeries, reps: Sequence[Cycle],
+               metrics: List[Dict[str, float]]) -> List[str]:
+        """After every rep is summarized: adjust the metrics that depend on the whole set
+        (which rep is the first or last, for instance). Returns notes for the report."""
+        return []
 
     # ---- helpers shared by stations
     @staticmethod
