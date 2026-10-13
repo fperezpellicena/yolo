@@ -20,7 +20,7 @@ Writes `<clip>_analysis/` containing:
     reps.csv         every metric for every rep
     summary.json     machine-readable summary
     forces.json      the force model frame by frame (with the force analysis, below)
-    pose_cache.npz   the pose pass, so re-analysis is instant
+    pose_cache.npz   the pose pass (and the camera's motion), so re-analysis is instant
 
 Tuning thresholds with a coach (no re-running the model):
 
@@ -159,6 +159,7 @@ What it adds:
   | `f_shoulder_arm_cm`, `f_elbow_arm_cm` | distance from the joint to the cord's line at peak force |
   | `f_cord_work_j`, `f_energy_err` | work of the mapped curve on the video's payout; joint work vs PM5 work (%) |
   | `f_t_peak`, `frame_force_peak` | when the force peaked (video seconds / source frame) |
+  | `f_heel_lift_cm` | how far the near heel rose above its flat height in the stroke (cm; with a body-with-feet model only; not checked on the first and last strokes or a stroke with a step) |
 
   "At peak force" is a tension-weighted average over the frames above 80% of
   the stroke's peak, so a value does not hinge on one frame.
@@ -173,7 +174,31 @@ zero-lag 4th-order Butterworth at 6 Hz and put in metres (x towards the
 machine, y up, origin on the floor under the static ankle). Segments follow
 de Leva's (1996) masses, centres of mass and radii of gyration by sex (forearm
 and hand as one segment, the grip a hand length beyond the wrist, the head's
-centre of mass at the ear, the feet static). Each video stroke is paired with a
+centre of mass at the ear, the feet static).
+
+The camera and the feet:
+
+* A phone that drifts moves the machine and the floor in the picture. The pose
+  pass measures the camera's motion on the still background (features outside
+  the athlete's box, 4 times a second; `pose_app/analysis/camera.py`) and keeps
+  it in the pose cache. The force model takes it out of every keypoint and
+  works in the first frame's camera, where the calibration was clicked, then
+  draws back onto each frame. A pose cache made before this is measured from
+  the video again when a force setup is given. The report says when the camera
+  moved the floor by more than 3 cm.
+* With a body-with-feet model (RTMPose, Halpe-26), the ankle height, the heel
+  and the toe are the athlete's own (medians over the clip; implausible values
+  fall back, with a note) instead of fractions of stature, so the floor sits
+  under the soles and the force capacity uses the athlete's own base of
+  support.
+* Feet that move within a stroke (stepping into or out of place) are reported:
+  the model takes the feet as still, so those strokes are less reliable.
+* Heels off the floor: the heel's height above the toe, beyond its usual flat
+  height, gives `f_heel_lift_cm` per stroke. 5 cm or more is reported, because
+  the model takes the feet as flat (provisional: on flat feet the foot points
+  slide by up to about 4 cm with the posture). It is a check on the model, not
+  a technique fault; whether rising onto the toes is good SkiErg technique is a
+  coaching question. Each video stroke is paired with a
 PM5 stroke by the drive ends and drive times (to 0.01 s on the PM5's own
 clock); the pairing's confidence is reported, and force is only used when it
 is clear. Curves spaced by handle travel are placed by the fraction of the cord
@@ -190,7 +215,8 @@ technique measures, not injury risk.
 Checks the report raises: strokes the PM5 could not be matched to, the video's
 cord payout against the PM5's drive length (calibration), the curves' work
 against the PM5's, the energy check, the stick against the athlete's height,
-and keypoint jitter at the (static) ankle.
+keypoint jitter at the (static) ankle, a camera that moved, feet that stepped,
+heels off the floor, and measured feet that do not look right.
 
 Capture protocol: tripod side-on and square to the athlete at hip height, 3-4
 m away, the whole body and the cord exit in frame, 1080p at 30 fps or more
@@ -365,6 +391,8 @@ pairs are flattened `[x0, y0, x1, y1, ...]` and a missing value is null.
   above), `fps`, `frame_size`, `px_per_m`, `facing`, `mass_kg`,
   `weight_n`, `cord_exit`, `floor_y`, `fixed_points` (ankle, heel and toe: the
   feet are flat and still in the model), `feet` (mass and centre of mass),
+  `feet_measured` (the ankle height, heel and toe are the athlete's own, from a
+  body-with-feet model; else fractions of stature),
   `segments` (name, the points it joins, its mass, its centre of mass as a
   fraction from `from` to `to`, and the points to draw it between),
   `joints` (elbow, shoulder, hip, knee, ankle), `reported` (elbow and
@@ -380,6 +408,14 @@ pairs are flattened `[x0, y0, x1, y1, ...]` and a missing value is null.
 * Also per frame, the geometry of the pull: `arm` (the shoulder's and the
   elbow's distance to the cord's line, cm) and `com_height` (the body's centre
   of mass above the floor, cm). Both are known without the PM5 log.
+* `camera`: per frame, the camera's motion as `[a, b, c, d, e, f]`, taking a
+  first-frame pixel (x, y) to that frame's `(a x + b y + c, d x + e y + f)`.
+  `cord_exit`, `floor_y`, `fixed_points` and `feet` are first-frame pixels (as
+  the calibration was clicked): map them through frame i's to draw them on
+  frame i. The per-frame positions are already in their own frame's pixels.
+  `[1, 0, 0, 0, 1, 0]` for a still camera.
+* `heel_lift_cm`: per frame, the heel's height above its flat height (null
+  without a body-with-feet model).
 * `strokes`: each stroke as `[first, last]` sample, catch to catch.
 * `typical`: every series through the typical stroke, for a chart of it.
   `x` runs from 0 to 100% of the stroke in 51 points; for each series
@@ -487,6 +523,7 @@ definitions, not only error.
             cli.py              hyrox_analyze.py options
             video.py            VideoReader: file frames with real timestamps
             tracking.py         AthleteTracker: follow one person
+            camera.py           CameraTracker: the camera's motion, from the background
             body.py             normalised body metrics for the whole clip
             signal.py           gap filling, zero-lag smoothing, rep detection
             rules.py            Rule / DriftRule: thresholds + coaching cues

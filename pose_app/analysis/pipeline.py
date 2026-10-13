@@ -10,6 +10,7 @@ from ..person import Person
 from ..skeleton import NUM_KEYPOINTS, pad_keypoints
 from ..pm5 import Pm5Session
 from .body import BodySeries, build_body_series
+from .camera import CameraTracker
 from .force import (ForceAnalysis, ForceSetup, StrokeSync, analyze_force, analyze_geometry,
                     attach_force, force_drift_rules, force_rules, sync_by_hands)
 from .rules import Drift, Fault, Rule, apply_overrides, evaluate_drift
@@ -42,13 +43,17 @@ class Extraction:
     # What the pass depended on (video, clip, athlete choice, model settings), so a later
     # run can tell whether it can reuse it; {} in caches written before it was kept
     params: Dict[str, Any] = field(default_factory=dict)
+    # The camera's motion (camera.py): (N, 2, 3) first-frame -> frame pixels, NaN where not
+    # sampled; None in caches made before it was measured
+    camera: Optional[np.ndarray] = None
 
     def save(self, path: str) -> None:
+        extra = {} if self.camera is None else {"camera": self.camera.astype(np.float32)}
         np.savez_compressed(
             path, version=CACHE_VERSION, video_path=self.video_path, fps=self.fps,
             frame_size=np.array(self.frame_size), model=self.model, t=self.t,
             frame_index=self.frame_index, keypoints=self.keypoints,
-            scores=self.scores, boxes=self.boxes, params=json.dumps(self.params))
+            scores=self.scores, boxes=self.boxes, params=json.dumps(self.params), **extra)
 
     @classmethod
     def load(cls, path: str) -> "Extraction":
@@ -57,8 +62,9 @@ class Extraction:
             raise ValueError("pose cache was written by another version; re-run without --reuse")
         params = json.loads(str(d["params"])) if "params" in d.files else {}
         kp, sc = pad_keypoints(d["keypoints"], d["scores"])     # 17-point caches: no feet
+        camera = d["camera"].astype(float) if "camera" in d.files else None
         return cls(str(d["video_path"]), float(d["fps"]), tuple(int(v) for v in d["frame_size"]),
-                   str(d["model"]), d["t"], d["frame_index"], kp, sc, d["boxes"], params)
+                   str(d["model"]), d["t"], d["frame_index"], kp, sc, d["boxes"], params, camera)
 
 
 def extract(reader: VideoReader, detect: Callable[[np.ndarray], List[Person]],
@@ -67,8 +73,10 @@ def extract(reader: VideoReader, detect: Callable[[np.ndarray], List[Person]],
     """`on_progress(frames done, frames in clip or 0)` is called after every frame."""
     ts, idxs, kps, scs, boxes = [], [], [], [], []
     total = reader.clip_frame_count
+    camera = CameraTracker(reader.info.fps)
     for n, (index, t, frame) in enumerate(reader.frames(), 1):
         athlete = tracker.select(detect(frame))
+        camera.update(frame, None if athlete is None else athlete.box)
         ts.append(t)
         idxs.append(index)
         if athlete is None:
@@ -87,7 +95,18 @@ def extract(reader: VideoReader, detect: Callable[[np.ndarray], List[Person]],
     info = reader.info
     return Extraction(info.path, info.fps, (info.width, info.height), model_name,
                       np.array(ts), np.array(idxs), np.array(kps), np.array(scs),
-                      np.array(boxes))
+                      np.array(boxes), camera=camera.result(len(ts)))
+
+
+def add_camera(ex: Extraction, reader: VideoReader) -> None:
+    """Measure the camera's motion for a pose pass made before it was (reads the video again)."""
+    rows = {int(i): k for k, i in enumerate(ex.frame_index)}
+    camera = CameraTracker(ex.fps)
+    for index, _, frame in reader.frames():
+        k = rows.get(int(index))
+        if k is not None:
+            camera.update(frame, ex.boxes[k])
+    ex.camera = camera.result(len(ex.t))
 
 
 @dataclass
@@ -167,7 +186,7 @@ def analyze(ex: Extraction, station: Station, min_score: float = 0.5,
         prior, window = _sync_prior(alignment, telemetry_offset, from_pm5)
         if force_setup is not None and station.force:
             force = analyze_force(ex.t, ex.keypoints, ex.scores, body, cycles, ex.fps, pm5,
-                                  force_setup, min_score, prior, window)
+                                  force_setup, min_score, prior, window, ex.camera)
             sync = force.sync
         else:
             sync = sync_by_hands(body, cycles, pm5, prior, window)
@@ -196,7 +215,7 @@ def analyze(ex: Extraction, station: Station, min_score: float = 0.5,
     result.warnings = _warnings(result)
     if pm5 is None and force_setup is not None and station.force:
         result.force_geometry = analyze_geometry(ex.t, ex.keypoints, ex.scores, body, cycles,
-                                                 ex.fps, force_setup, min_score)
+                                                 ex.fps, force_setup, min_score, ex.camera)
         result.warnings.extend(result.force_geometry.checks)
     return result
 
