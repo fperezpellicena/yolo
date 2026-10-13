@@ -6,7 +6,7 @@ from typing import Callable, List, Optional, Tuple
 import cv2
 import numpy as np
 
-from ..skeleton import KP
+from ..skeleton import EDGES, KP
 from ..drawing.text import darken, text_size, thickness
 from ..drawing.theme import AA, ACCENT, FONT, TEXT
 from .force.overlay import draw_force, header_line
@@ -20,14 +20,6 @@ MINOR = (0, 180, 255)
 MAJOR = (60, 60, 235)
 SEVERITY_COLOR = {None: GOOD, "minor": MINOR, "major": MAJOR}
 
-EDGES = [(a, b) for a, b in (
-    ("left_shoulder", "right_shoulder"), ("left_hip", "right_hip"),
-    ("left_shoulder", "left_hip"), ("right_shoulder", "right_hip"),
-    ("left_shoulder", "left_elbow"), ("left_elbow", "left_wrist"),
-    ("right_shoulder", "right_elbow"), ("right_elbow", "right_wrist"),
-    ("left_hip", "left_knee"), ("left_knee", "left_ankle"),
-    ("right_hip", "right_knee"), ("right_knee", "right_ankle"),
-)]
 ANGLE_JOINTS = (("elbow", "elbow"), ("hip", "hip"), ("knee", "knee"))
 
 

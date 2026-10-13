@@ -1,0 +1,5 @@
+# Optional pose backend: RTMPose through rtmlib (ONNX Runtime, no mmcv).
+# Use with --model rtmpose-s / rtmpose-m / rtmpose-x. For an NVIDIA GPU,
+# install onnxruntime-gpu instead of onnxruntime.
+rtmlib>=0.0.13
+onnxruntime>=1.17

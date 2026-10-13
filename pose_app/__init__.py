@@ -10,7 +10,8 @@ the PM5 recorder that feeds the force analysis:
 They share the modules at this level, and depend only on them (the worker
 also on analysis/, analysis on pm5/ to read PM5 logs), never on each other:
 
-    estimator.py         PoseEstimator: YOLO inference -> Person records
+    estimator.py         PoseEstimator: YOLO inference -> Person records; load_estimator()
+    rtm_estimator.py     the same through rtmlib (RTMPose, ONNX)
     person.py            Person: one detected body
     skeleton.py          COCO-17 keypoints and the joint-angle definitions
     geometry.py          angle maths

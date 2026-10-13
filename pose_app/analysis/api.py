@@ -12,6 +12,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from ..rtm_estimator import is_rtm_model
 from .force import ForceSetup, force_drift_rules, force_rules
 from .force.frames import write_force_frames
 from .pipeline import AnalysisResult, EmptyClipError, Extraction, analyze, extract
@@ -115,7 +116,7 @@ def run_analysis(video_path: str, out_dir: str, opts: Optional[AnalysisOptions] 
                  estimator=None, on_progress: Optional[ProgressFn] = None) -> AnalysisOutcome:
     """Analyse `video_path` and write report, CSV, JSON, video and pose cache to `out_dir`.
 
-    `estimator` is a loaded PoseEstimator (anything with `.detect(frame)`) so a
+    `estimator` is a loaded estimator (anything with `.detect(frame)`) so a
     long-lived caller loads the model once; when omitted one is built from
     `opts`. Its settings must then match `opts.model` and `opts.kpt_conf`.
     """
@@ -220,6 +221,10 @@ def pose_params(video_path: str, opts: AnalysisOptions) -> Dict[str, Any]:
     for key in CLIP_KEYS + MODEL_KEYS:
         value = getattr(opts, key)
         params[key] = [float(v) for v in value] if isinstance(value, (tuple, list)) else value
+    if is_rtm_model(opts.model):
+        # RTMPose caches keep the feet since the Halpe-26 layout; earlier ones (17 points)
+        # lack this key, so they are not reused as if they had them
+        params["keypoints"] = "halpe26"
     return params
 
 
@@ -256,8 +261,8 @@ def _extraction(reader: VideoReader, opts: AnalysisOptions, cache: str, estimato
             log.info("Not reusing the previous pose pass: made with another " +
                      ", ".join(changed) + ".")
     if estimator is None:
-        from ..estimator import PoseEstimator
-        estimator = PoseEstimator(opts.model, opts.conf, opts.imgsz, opts.device, opts.kpt_conf)
+        from ..estimator import load_estimator
+        estimator = load_estimator(opts.model, opts.conf, opts.imgsz, opts.device, opts.kpt_conf)
     info = reader.info
     tracker = AthleteTracker(opts.athlete, opts.athlete_point, (info.width, info.height))
     try:
