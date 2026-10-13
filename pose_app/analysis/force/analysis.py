@@ -21,8 +21,9 @@ from ...pm5.session import Pm5Session, Pm5Stroke
 from ..body import BodySeries
 from ..signal import Cycle
 from .dynamics import Dynamics, inverse_dynamics, moment_arm, static_capacity
-from .kinematics import (ImageFrame, Kinematics, body_points, fit_frame, keypoint_tracks,
-                         kinematics, lowpass, pixel_lengths)
+from .kinematics import (FOOT_BOUNDS, ImageFrame, Kinematics, body_points, camera_matrices,
+                         fit_frame, foot_geometry, heel_lift, keypoint_tracks, kinematics, lowpass,
+                         moved_by, pixel_lengths, steady, stepping, unsteady)
 from .model import G, BodyModel
 from .setup import ForceSetup
 from .sync import (DriveWindow, StrokeSync, curve_profile, hand_windows, map_curve,
@@ -34,11 +35,14 @@ FORCE_KEYS = ("f_peak_n", "f_avg_n", "f_work_j", "f_drive_len_m", "f_drive_time_
               "f_com_drop_after_cm", "f_cord_angle", "f_friction", "f_capacity_n",
               "f_shoulder_ext_nm", "f_shoulder_ext_max_nm", "f_elbow_flex_nm",
               "f_shoulder_arm_cm", "f_elbow_arm_cm", "f_cord_work_j", "f_energy_err",
-              "f_t_peak")
+              "f_t_peak", "f_heel_lift_cm")
 CHECK_PAYOUT = 0.10           # video payout vs PM5 drive length
 CHECK_WORK = 0.10             # cord work from the curve vs PM5 work per stroke
 CHECK_ENERGY = 0.15           # joint work vs PM5 work per stroke
 CHECK_JITTER_MM = 15.0        # above this, even the upper-body moments get noisy
+CHECK_CAMERA_M = 0.03         # the camera moved the floor more than this during the clip: say so
+HEEL_LIFT_CM = 5.0            # a heel this far above its flat height is off the floor (provisional:
+                              # on flat feet the heel and toe points slide by up to ~4 cm)
 PEAK_ZONE = 0.8               # "at peak force": frames above this share of the stroke's peak
 CURVE_GRID = np.linspace(0.0, 1.0, 51)
 
@@ -70,6 +74,13 @@ class ForceAnalysis:
     kin: Optional[Kinematics] = None
     dyn: Optional[Dynamics] = None
     pixels: Dict[str, np.ndarray] = field(default_factory=dict)   # filtered tracks + grip, com
+    # The camera's motion (N, 3, 3): first-frame pixels -> frame i's. The model works in the
+    # first frame's camera; this draws it back on each frame. Identity for a still camera.
+    camera: Optional[np.ndarray] = None
+    feet_source: str = "height"                   # "measured" (body-with-feet model) or "height"
+    heel_lift: Optional[np.ndarray] = None        # (N,) m, heel above its flat height; NaN unmeasured
+    heel_lift_by_cycle: List[float] = field(default_factory=list)   # cm, highest per video stroke
+    stepping: List[int] = field(default_factory=list)   # video strokes in which the feet moved
     strokes: List[ForceStroke] = field(default_factory=list)
     checks: List[str] = field(default_factory=list)
     summary: Dict[str, float] = field(default_factory=dict)
@@ -82,6 +93,96 @@ class ForceAnalysis:
     def per_side(self, joint: str) -> np.ndarray:
         """Net moment at a joint for one side (N m, counter-clockwise positive)."""
         return self.dyn.moment[joint] / 2.0
+
+    def to_video(self, px: np.ndarray) -> np.ndarray:
+        """First-frame pixels (N, 2) -> where they appear in each frame of the video."""
+        return px if self.camera is None else unsteady(self.camera, px)
+
+    def exit_px(self, i: int) -> np.ndarray:
+        """The cord exit (clicked on the first frame) as it appears in frame i."""
+        p = np.asarray(self.setup.calibration.cord_exit, float)
+        return p if self.camera is None else unsteady(self.camera[i:i + 1], p[None])[0]
+
+
+@dataclass
+class _Placed:
+    """The athlete in metres: what both force modes start from."""
+    raw: Dict[str, np.ndarray]         # filtered tracks, video pixels
+    camera: np.ndarray                 # (N, 3, 3) first-frame -> frame pixels
+    frame: ImageFrame
+    model: BodyModel
+    points: Dict[str, np.ndarray]      # metres
+    heel_lift: np.ndarray              # (N,) m
+    feet_source: str
+    stepping: List[int]                # strokes in which the feet moved
+
+
+def _place(t: np.ndarray, keypoints: np.ndarray, scores: np.ndarray, body: BodySeries,
+           cycles: Sequence[Cycle], fps: float, setup: ForceSetup, min_score: float,
+           camera: Optional[np.ndarray]) -> Tuple[Optional[_Placed], List[str]]:
+    """Tracks steadied against the camera's motion, the image frame, the body model (with the
+    athlete's own feet when they were measured) and the joints in metres."""
+    raw = keypoint_tracks(t, keypoints, scores, body.side, min_score, fps)
+    cam = camera_matrices(camera, len(t), fps)
+    tracks = {k: steady(cam, v) for k, v in raw.items()}     # the first frame's camera
+    feet_px = foot_geometry(tracks, body.facing)
+    frame, notes = fit_frame(setup.calibration, setup.athlete, tracks, body.facing)
+    if frame is None:
+        return None, notes
+    feet = None
+    if feet_px is not None:
+        H = setup.athlete.height_m
+        feet = {k: feet_px[k] / frame.scale for k in FOOT_BOUNDS}
+        if all(lo <= feet[k] / H <= hi for k, (lo, hi) in FOOT_BOUNDS.items()):
+            frame, notes = fit_frame(setup.calibration, setup.athlete, tracks, body.facing,
+                                     feet_px["ankle_h"])
+        else:
+            notes.append("The feet were measured but do not look right (ankle "
+                         f"{100 * feet['ankle_h']:.0f} cm above the floor, heel "
+                         f"{100 * feet['heel']:.0f} cm behind and toe {100 * feet['toe']:.0f} cm "
+                         "ahead of the ankle), so the force model uses the usual fractions of "
+                         "the athlete's height for them.")
+            feet = None
+    moved = moved_by(cam, frame.origin) / frame.scale
+    if moved > CHECK_CAMERA_M:
+        notes.append(f"The camera moved during the clip, shifting the floor by up to "
+                     f"{100 * moved:.0f} cm in the picture. The force model follows it (measured "
+                     "on the background), but a phone on a fixed support measures better.")
+    steps = stepping(tracks, cycles, frame.scale)
+    if steps:
+        which = ", ".join(str(k + 1) for k in steps)
+        notes.append(f"The feet moved (stepping) during stroke{'s' if len(steps) > 1 else ''} "
+                     f"{which}. The force model takes the feet as still, so "
+                     f"{'those strokes are' if len(steps) > 1 else 'that stroke is'} less "
+                     f"reliable and the heel check leaves {'them' if len(steps) > 1 else 'it'} out.")
+    lengths_px = pixel_lengths(tracks)
+    lengths = {"forearm_hand": lengths_px["forearm"], **{k: v for k, v in lengths_px.items()
+                                                         if k != "forearm"}}
+    model = BodyModel(setup.athlete, {k: v / frame.scale for k, v in lengths.items()}, feet)
+    points = body_points(tracks, frame, model)
+    return _Placed(raw, cam, frame, model, points, heel_lift(tracks, frame.scale),
+                   "measured" if feet is not None else "height", steps), notes
+
+
+def _heel_lifts(fa: "ForceAnalysis", cycles: Sequence[Cycle]) -> List[str]:
+    """The highest heel lift of every video stroke checked (cm, NaN for the others), and a
+    note when heels left the floor. The first and last strokes (stepping into and out of
+    place) and any stroke with a step are not checked: a step lifts a heel too."""
+    lift = 100.0 * fa.heel_lift
+    fa.heel_lift_by_cycle = []
+    last = len(cycles) - 1
+    for k, c in enumerate(cycles):
+        seg = lift[c.start:c.end + 1]
+        ok = np.isfinite(seg).any() and 0 < k < last and k not in fa.stepping
+        fa.heel_lift_by_cycle.append(float(np.nanmax(seg)) if ok else math.nan)
+    checked = [v for v in fa.heel_lift_by_cycle if math.isfinite(v)]
+    high = [v for v in checked if v >= HEEL_LIFT_CM]
+    if not high:
+        return []
+    return [f"Heels came off the floor ({HEEL_LIFT_CM:.0f} cm or more) on {len(high)} of the "
+            f"{len(checked)} strokes checked, up to {max(high):.0f} cm. The force model takes the "
+            "feet as flat, so the floor force and the force capacity are less reliable on those "
+            "strokes."]
 
 
 def pm5_drives(pm5: Pm5Session) -> Tuple[np.ndarray, np.ndarray]:
@@ -100,24 +201,19 @@ def sync_by_hands(body: BodySeries, cycles: Sequence[Cycle], pm5: Pm5Session,
 
 def analyze_geometry(t: np.ndarray, keypoints: np.ndarray, scores: np.ndarray, body: BodySeries,
                      cycles: Sequence[Cycle], fps: float, setup: ForceSetup,
-                     min_score: float = 0.5) -> ForceAnalysis:
+                     min_score: float = 0.5, camera: Optional[np.ndarray] = None) -> ForceAnalysis:
     """The force model from the video alone, without a PM5 log: the body model, the cord's
     line and the moment arms are geometry. The cords' pull is unknown during each drive
     (found from the cord's payout), so the forces there are too; between drives the cords
     are slack and the forces follow from gravity and the body's motion. `pm5` and `sync`
     are None; `checks` says what the video could not give."""
     fa = ForceAnalysis(setup, None, None)
-    tracks = keypoint_tracks(t, keypoints, scores, body.side, min_score, fps)
-    frame, notes = fit_frame(setup.calibration, setup.athlete, tracks, body.facing)
+    placed, notes = _place(t, keypoints, scores, body, cycles, fps, setup, min_score, camera)
     fa.checks = list(notes)
-    if frame is None:
+    if placed is None:
         fa.checks.append("Force lines skipped: the athlete's feet were not measured.")
         return fa
-    lengths_px = pixel_lengths(tracks)
-    lengths = {"forearm_hand": lengths_px["forearm"], **{k: v for k, v in lengths_px.items()
-                                                         if k != "forearm"}}
-    model = BodyModel(setup.athlete, {k: v / frame.scale for k, v in lengths.items()})
-    points = body_points(tracks, frame, model)
+    frame, model, points = placed.frame, placed.model, placed.points
     exit_m = frame.to_m(np.array(setup.calibration.cord_exit, float))
     to_exit = exit_m[None, :] - points["grip"]
     L = np.linalg.norm(to_exit, axis=1)
@@ -135,25 +231,29 @@ def analyze_geometry(t: np.ndarray, keypoints: np.ndarray, scores: np.ndarray, b
         values[unknown] = np.nan
     fa.frame, fa.model, fa.t, fa.frame_index = frame, model, t, body.frame_index
     fa.exit_m, fa.cord_dir, fa.tension, fa.kin, fa.dyn = exit_m, u, tension, kin, dyn
-    fa.pixels = {**tracks, "grip": frame.to_px(points["grip"]), "com": frame.to_px(kin.body_com)}
+    _keep_placement(fa, placed, kin)
+    fa.checks.extend(_heel_lifts(fa, cycles))
     return fa
+
+
+def _keep_placement(fa: "ForceAnalysis", placed: _Placed, kin: Kinematics) -> None:
+    fa.camera, fa.feet_source, fa.heel_lift = placed.camera, placed.feet_source, placed.heel_lift
+    fa.stepping = placed.stepping
+    to_px = placed.frame.to_px
+    fa.pixels = {**placed.raw, "grip": fa.to_video(to_px(placed.points["grip"])),
+                 "com": fa.to_video(to_px(kin.body_com))}
 
 
 def analyze_force(t: np.ndarray, keypoints: np.ndarray, scores: np.ndarray, body: BodySeries,
                   cycles: Sequence[Cycle], fps: float, pm5: Pm5Session, setup: ForceSetup,
                   min_score: float = 0.5, prior: Optional[float] = None,
-                  prior_window: float = 3.0) -> ForceAnalysis:
-    tracks = keypoint_tracks(t, keypoints, scores, body.side, min_score, fps)
-    frame, notes = fit_frame(setup.calibration, setup.athlete, tracks, body.facing)
-    if frame is None:
+                  prior_window: float = 3.0, camera: Optional[np.ndarray] = None) -> ForceAnalysis:
+    placed, notes = _place(t, keypoints, scores, body, cycles, fps, setup, min_score, camera)
+    if placed is None:
         fa = ForceAnalysis(setup, pm5, sync_by_hands(body, cycles, pm5, prior, prior_window))
         fa.checks = notes + ["Force analysis skipped: the athlete's feet were not measured."]
         return fa
-    lengths_px = pixel_lengths(tracks)
-    lengths = {"forearm_hand": lengths_px["forearm"], **{k: v for k, v in lengths_px.items()
-                                                         if k != "forearm"}}
-    model = BodyModel(setup.athlete, {k: v / frame.scale for k, v in lengths.items()})
-    points = body_points(tracks, frame, model)
+    frame, model, points = placed.frame, placed.model, placed.points
     exit_m = frame.to_m(np.array(setup.calibration.cord_exit, float))
     to_exit = exit_m[None, :] - points["grip"]
     L = np.linalg.norm(to_exit, axis=1)
@@ -197,15 +297,27 @@ def analyze_force(t: np.ndarray, keypoints: np.ndarray, scores: np.ndarray, body
     dyn = inverse_dynamics(kin, model, tension[:, None] * u)
     fa.tension, fa.kin, fa.dyn = tension, kin, dyn
     fa.peak_tension = float(np.nanmax(tension)) if np.isfinite(tension).any() else math.nan
-    fa.pixels = {**tracks, "grip": frame.to_px(points["grip"]),
-                 "com": frame.to_px(kin.body_com)}
+    _keep_placement(fa, placed, kin)
     for s in strokes:
         s.metrics = _stroke_metrics(fa, s, L)
     fa.strokes = strokes
     fa.summary, fa.curves = _summary(fa, len(cycles)), _mean_curves(strokes)
     fa.summary["jitter_mm"] = _ankle_jitter(t, keypoints, scores, body.side, min_score, frame, fps)
+    fa.summary.update(_placement_summary(fa))
     fa.checks.extend(_checks(fa, len(cycles)))
+    fa.checks.extend(_heel_lifts(fa, cycles))
+    fa.summary["heel_lift_strokes"] = float(sum(1 for v in fa.heel_lift_by_cycle
+                                                if math.isfinite(v) and v >= HEEL_LIFT_CM))
     return fa
+
+
+def _placement_summary(fa: "ForceAnalysis") -> Dict[str, float]:
+    """The feet the model used (cm) and how far the picture moved (cm)."""
+    m = fa.model
+    moved = moved_by(fa.camera, fa.frame.origin) / fa.frame.scale
+    return {"feet_measured": float(m.feet_measured), "ankle_h_cm": 100.0 * m.ankle_h,
+            "heel_cm": 100.0 * m.heel, "toe_cm": 100.0 * m.toe, "camera_moved_cm": 100.0 * moved,
+            "stepping_strokes": float(len(fa.stepping))}
 
 
 def _integral(y: np.ndarray, t: np.ndarray) -> float:
@@ -390,3 +502,5 @@ def attach_force(metrics: Sequence[Dict[str, float]], fa: ForceAnalysis) -> None
         if s is not None:
             vals = dict(s.metrics)
             m.update(vals)
+        if k < len(fa.heel_lift_by_cycle):          # every video stroke, matched or not
+            m["f_heel_lift_cm"] = fa.heel_lift_by_cycle[k]

@@ -8,6 +8,17 @@ body together:
   * `points`: the model's moving points (grip, wrist, elbow, shoulder, ear,
     hip, knee). The feet are flat and still in the model, so the ankle, heel
     and toe are fixed and listed once in `fixed_points`, on `floor_y`.
+  * `camera`: the camera's motion, measured on the background: for each frame
+    [a, b, c, d, e, f], taking a first-frame pixel (x, y) to that frame's
+    (a x + b y + c, d x + e y + f). `floor_y`, `fixed_points`, `feet` and
+    `cord_exit` are first-frame pixels, as the calibration was clicked: map
+    them through frame i's to draw them on frame i. Every per-frame position
+    (`points`, `body_com`, `cop_x`) is already in its own frame's pixels.
+    [1, 0, 0, 0, 1, 0] for a still camera.
+  * `feet_measured`: true when a body-with-feet model measured the athlete's
+    ankle height, heel and toe (else they are fractions of stature), and
+    `heel_lift_cm`: how far the heel stands above its flat height, per frame
+    (null without measured feet).
   * `segments`: the model's rigid segments between those points, each with
     its mass and where its centre of mass lies (a fraction of the way from
     `from` to `to`), so a page can draw them; `body_com` is the whole body's
@@ -106,7 +117,8 @@ def force_frames(fa: ForceAnalysis, fps: float, frame_size,
     frame, model, kin, dyn = fa.frame, fa.model, fa.kin, fa.dyn
     # A force in the model's frame (x towards the machine, y up) -> image directions
     image = np.array([frame.facing, -1.0])
-    px = lambda m: frame.to_px(np.asarray(m, float))
+    px = lambda m: frame.to_px(np.asarray(m, float))            # first-frame pixels
+    video = lambda m: fa.to_video(px(m))                             # where they are, frame by frame
     feet = {"ankle": px([0.0, model.ankle_h]), "heel": px([-model.heel, 0.0]),
             "toe": px([model.toe, 0.0])}
     segments = []
@@ -118,7 +130,9 @@ def force_frames(fa: ForceAnalysis, fps: float, frame_size,
                          "drawn": [drawn_start, drawn_end]})
     floor_y = float(px([0.0, 0.0])[1])
     cop = np.where(np.isfinite(dyn.cop_x), dyn.cop_x, np.nan)
-    cop_px = frame.origin[0] + frame.facing * cop * frame.scale
+    on_floor = np.stack([frame.origin[0] + frame.facing * cop * frame.scale,
+                         np.full(len(cop), frame.origin[1])], -1)
+    cop_px = fa.to_video(on_floor)[:, 0]
     grip = kin.points["grip"]
     arms = {j: 100.0 * moment_arm(kin.points[j], grip, fa.cord_dir) for j in ARM_JOINTS}
     com_height = 100.0 * kin.body_com[:, 1]
@@ -142,6 +156,9 @@ def force_frames(fa: ForceAnalysis, fps: float, frame_size,
         "mass_kg": model.mass,
         "weight_n": _round(model.mass * G, 1),
         "cord_exit": [_round(v, 1) for v in fa.setup.calibration.cord_exit],
+        "camera": [[_round(v, 4) for v in m[:2].ravel()] for m in
+                   (fa.camera if fa.camera is not None else np.tile(np.eye(3), (len(fa.t), 1, 1)))],
+        "feet_measured": bool(model.feet_measured),
         "floor_y": _round(floor_y, 1),
         "fixed_points": {k: [_round(v, 1) for v in p] for k, p in feet.items()},
         "feet": {"mass_kg": round(model.feet_mass, 2),
@@ -151,8 +168,8 @@ def force_frames(fa: ForceAnalysis, fps: float, frame_size,
         "reported": list(REPORTED_JOINTS),
         "moment_names": {j: list(MOMENT_NAMES[j]) for j in JOINTS},
         "t": _scalars(fa.t, 3),
-        "points": {name: _pairs(px(kin.points[name]), 1) for name in POINTS},
-        "body_com": _pairs(px(kin.body_com), 1),
+        "points": {name: _pairs(video(kin.points[name]), 1) for name in POINTS},
+        "body_com": _pairs(video(kin.body_com), 1),
         "tension": _scalars(fa.tension, 0),
         "passed": {j: _pairs(-dyn.joint_force[j] * image, 0) for j in JOINTS},
         "floor": _pairs(dyn.floor * image, 0),
@@ -160,6 +177,8 @@ def force_frames(fa: ForceAnalysis, fps: float, frame_size,
         "moment": {j: _scalars(fa.per_side(j), 1) for j in JOINTS},
         "arm": {j: _scalars(arms[j], 1) for j in ARM_JOINTS},
         "com_height": _scalars(com_height, 1),
+        "heel_lift_cm": _scalars(100.0 * fa.heel_lift if fa.heel_lift is not None
+                                 else np.full(len(fa.t), np.nan), 1),
         "strokes": strokes,
         "typical": {"x": [round(float(v), 1) for v in TYPICAL_GRID], "strokes": len(strokes),
                     "series": _typical(series, strokes, digits)},

@@ -12,12 +12,14 @@ Mapping onto COCO keypoints (approximations, documented in the README):
   * head and neck: shoulder -> ear, centre of mass at the ear;
   * forearm and hand: one rigid segment; the grip is a hand length beyond the
     wrist along the forearm, the hand's centre of mass at 79% (75% women) of it;
-  * feet: flat and static; they add weight but no motion.
+  * feet: flat and static; they add weight but no motion. Their size and the
+    ankle's height are the athlete's own when a body-with-feet model measured
+    them (kinematics.foot_geometry), else fractions of stature.
 Limbs count twice (left and right move together).
 """
 
 from dataclasses import dataclass
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 
@@ -96,14 +98,20 @@ class Segment:
 class BodyModel:
     """Segment masses and inertias for one athlete, from session-median segment lengths."""
 
-    def __init__(self, athlete: AthleteProfile, lengths: Dict[str, float]):
-        """`lengths`: metres, measured between the keypoints of SEGMENTS (forearm = elbow-wrist)."""
+    def __init__(self, athlete: AthleteProfile, lengths: Dict[str, float],
+                 feet: Optional[Dict[str, float]] = None):
+        """`lengths`: metres, measured between the keypoints of SEGMENTS (forearm = elbow-wrist).
+        `feet`: measured ankle_h, heel and toe in metres; None for fractions of stature."""
         self.athlete = athlete
         H, M = athlete.height_m, athlete.mass_kg
         tab = segment_table(athlete.sex)
         self.mass = M
         self.weight = M * G
-        self.ankle_h, self.heel, self.toe = ANKLE_H * H, HEEL * H, TOE * H
+        self.feet_measured = feet is not None
+        if feet is not None:
+            self.ankle_h, self.heel, self.toe = feet["ankle_h"], feet["heel"], feet["toe"]
+        else:
+            self.ankle_h, self.heel, self.toe = ANKLE_H * H, HEEL * H, TOE * H
         self.grip = GRIP * H
         self.neck = NECK * H
 

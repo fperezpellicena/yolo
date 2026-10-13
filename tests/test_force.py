@@ -14,6 +14,7 @@ import numpy as np
 import synthetic_force as sf
 from pose_app.analysis.api import AnalysisError, AnalysisOptions, default_thresholds, run_analysis
 from pose_app.analysis.force import ForceSetup
+from pose_app.analysis.force.analysis import HEEL_LIFT_CM
 from pose_app.analysis.force.dynamics import cross, static_capacity
 from pose_app.analysis.force.kinematics import _pass, _pass_numpy, lowpass
 from pose_app.analysis.force.model import BodyModel
@@ -39,11 +40,11 @@ def _inputs(travel=False):
     return _state[key]
 
 
-def _run(setup, log, out="out", **opts):
+def _run(setup, log, out="out", estimator=None, **opts):
     session, video, _, _ = _inputs()
     return run_analysis(video, os.path.join(_state["dir"], out),
                         AnalysisOptions(model="fake", pm5=log, force=setup, video=False, **opts),
-                        session.estimator())
+                        estimator or session.estimator())
 
 
 # ---------------------------------------------------------------- building blocks
@@ -156,7 +157,7 @@ TOLERANCE = {"f_peak_n": ("peak_n", 6.0), "f_bw_share": ("bw_share", 2.0),
              "f_friction": ("friction", 0.04), "f_capacity_n": ("capacity", 60.0)}
 
 
-def _check_against_truth(outcome, session, truth):
+def _check_against_truth(outcome, session, truth, allowed=()):
     res, fa = outcome.result, outcome.result.force
     assert fa.sync.ok and fa.sync.confidence == "high", fa.sync
     # machine time = video time + offset; the log's clock starts with its first notification
@@ -177,7 +178,7 @@ def _check_against_truth(outcome, session, truth):
         median = float(np.median(np.abs(errors[key])))
         assert median < tol, (key, median, tol)
     assert fa.summary["energy_err_median"] < 10, fa.summary
-    assert not fa.checks, fa.checks
+    assert not [c for c in fa.checks if not c.startswith(allowed)], fa.checks
 
 
 def test_force_analysis_recovers_the_truth_time_curves():
@@ -292,6 +293,160 @@ def test_the_force_model_goes_frame_by_frame_into_forces_json():
         lo, mid, hi = (arr(band[k]) for k in ("low", "median", "high"))
         assert np.isfinite(mid).all(), name                         # the PM5 knows every point
         assert (lo <= mid + 0.11).all() and (mid <= hi + 0.11).all(), name
+
+
+# ---------------------------------------------------------------- the camera and the feet
+
+FEET = {"heel": 0.025, "toe": 0.100}       # this athlete's own, unlike the stature fractions
+DRIFT = (-40.0, 60.0)                      # px by the end of the clip: a phone sliding down
+
+
+def test_camera_tracker_measures_the_background_not_the_athlete():
+    import cv2
+    from pose_app.analysis.camera import measure_camera
+    room = sf._room()
+    centre = (sf.W / 2, sf.H / 2)
+    truth, frames, boxes = [], [], []
+    for k in range(40):
+        a = cv2.getRotationMatrix2D(centre, 0.02 * k, 1 + 0.0004 * k)   # a slow turn and zoom...
+        a[:, 2] += [-0.8 * k, 1.5 * k]                                  # ...and slide
+        m = np.vstack([a, [0, 0, 1]]) @ np.array([[1, 0, -sf.ROOM_MARGIN], [0, 1, -sf.ROOM_MARGIN],
+                                                    [0, 0, 1]])
+        img = cv2.warpAffine(room, m[:2], (sf.W, sf.H))
+        box = np.array([380 + 6 * k, 150, 620 + 6 * k, 700])            # a moving athlete
+        cv2.rectangle(img, (int(box[0]), 150), (int(box[2]), 700), (255, 255, 255), -1)
+        cv2.circle(img, (int(box[0]) + 60 + 9 * k % 100, 400), 30, (0, 0, 0), -1)
+        frames.append(img)
+        boxes.append(box)
+        truth.append(m @ np.linalg.inv(np.array([[1, 0, -sf.ROOM_MARGIN],
+                                                  [0, 1, -sf.ROOM_MARGIN], [0, 0, 1]])))
+    cam = measure_camera(frames, np.array(boxes), fps=8.0)               # samples every other frame
+    sampled = [k for k in range(40) if np.isfinite(cam[k]).all()]
+    assert sampled[0] == 0 and len(sampled) >= 18, sampled
+    first = np.linalg.inv(truth[0])
+    for k in sampled:
+        want = (truth[k] @ first)[:2]
+        for p in ((100, 100), (330, 700), (900, 650)):                   # corners and the feet
+            got, exp = cam[k] @ [*p, 1], want @ [*p, 1]
+            assert np.linalg.norm(got - exp) < 1.5, (k, p, got, exp)
+
+
+def test_a_drifting_camera_is_steadied():
+    """The phone slides 7 cm down and 13 cm sideways over the piece; the force analysis still
+    finds the truth, and draws the model where the athlete is in each frame."""
+    session, _, log, truth = _inputs()
+    video = os.path.join(_state["dir"], "drift.mp4")
+    if not os.path.exists(video):
+        session.write_video(video, drift=DRIFT, texture=True)
+    kp, sc = session.keypoints(feet=FEET, drift=DRIFT, seed=11)
+    outcome = run_analysis(video, os.path.join(_state["dir"], "drift"),
+                           AnalysisOptions(model="fake", pm5=log, force=session.setup(), video=False),
+                           sf.FakeEstimator(kp, sc))
+    _check_against_truth(outcome, session, truth, allowed=("The camera moved",))
+    fa = outcome.result.force
+    assert any(c.startswith("The camera moved during the clip, shifting the floor by up to 2")
+               for c in fa.checks), fa.checks
+    assert not fa.stepping
+    with open(outcome.files["forces"]) as fh:
+        f = json.load(fh)
+    arr = lambda a: np.array([np.nan if v is None else v for v in a], float).reshape(-1, 2)
+    t = np.array(f["t"])
+    moved = (t / session.duration)[:, None] * DRIFT
+    floor = np.array([sf.ORIGIN[0], sf.ORIGIN[1], 1.0])
+    seen = np.array([np.reshape(m, (2, 3)) @ floor for m in f["camera"]]) - sf.ORIGIN
+    assert np.max(np.abs(seen - moved)[15:-15]) < 3, np.max(np.abs(seen - moved)[15:-15])
+    truth_px = session.points_at(t)
+    to_px = lambda m: np.stack([sf.ORIGIN[0] + m[..., 0] * sf.SCALE,
+                                sf.ORIGIN[1] - m[..., 1] * sf.SCALE], -1)
+    for name in ("elbow", "shoulder", "hip"):
+        err = np.linalg.norm(arr(f["points"][name]) - (to_px(truth_px[name]) + moved), axis=1)
+        assert np.nanmedian(err) < 3, (name, np.nanmedian(err))
+    # the first-frame references stay where the calibration was clicked
+    assert abs(f["floor_y"] - sf.ORIGIN[1]) < 2
+    assert f["cord_exit"] == list(session.setup().calibration.cord_exit)
+    # the old pose cache had no camera: it is measured from the video again, and kept
+    cache = outcome.files["pose_cache"]
+    with np.load(cache) as d:
+        stripped = {k: d[k] for k in d.files if k != "camera"}
+    np.savez_compressed(cache, **stripped)
+    again = run_analysis(video, os.path.join(_state["dir"], "drift"),
+                         AnalysisOptions(model="fake", pm5=log, force=session.setup(), video=False,
+                                         reuse=True))
+    assert np.allclose(again.result.force.camera, fa.camera, atol=1e-6)
+    with np.load(cache) as d:
+        assert "camera" in d.files
+
+
+def test_stepping_into_place_is_not_a_moving_camera():
+    """The athlete steps back 15 cm during the first stroke, the camera still: nothing moves the
+    machine, and the heel check leaves that stroke out."""
+    session, video, log, _ = _inputs()
+    kp, sc = session.keypoints(feet=FEET, step={"stroke": 0, "back_m": 0.15}, seed=11)
+    fa = _run(session.setup(), log, out="step", estimator=sf.FakeEstimator(kp, sc)).result.force
+    assert fa.stepping == [0], fa.stepping
+    assert np.allclose(fa.camera, np.eye(3))                  # the camera was not moved
+    assert not any(c.startswith("The camera moved") for c in fa.checks)
+    assert any(c.startswith("The feet moved (stepping) during stroke 1.") for c in fa.checks)
+    assert math.isnan(fa.heel_lift_by_cycle[0]) and math.isfinite(fa.heel_lift_by_cycle[1])
+    assert math.isnan(fa.heel_lift_by_cycle[-1])                # the last stroke: stepping out
+
+
+def test_measured_feet_set_the_floor_and_the_base_of_support():
+    session, _, log, _ = _inputs()
+    kp, sc = session.keypoints(feet=FEET, seed=11)
+    fa = _run(session.setup(), log, out="feet", estimator=sf.FakeEstimator(kp, sc)).result.force
+    m, H = fa.model, sf.HEIGHT
+    assert m.feet_measured and fa.feet_source == "measured"
+    assert abs(m.heel - FEET["heel"] * H) < 0.005 and abs(m.toe - FEET["toe"] * H) < 0.005
+    assert abs(m.ankle_h - sf.LEN["ankle_h"] * H) < 0.005             # floor where the soles are
+    assert fa.summary["feet_measured"] == 1 and abs(fa.summary["heel_cm"] - 4.5) < 0.5
+    assert not any(c.startswith(("The camera moved", "Heels", "The feet")) for c in fa.checks)
+    plain = _run(session.setup(), log).result.force                       # 17 points: no feet
+    assert not plain.model.feet_measured and plain.feet_source == "height"
+    assert plain.summary["feet_measured"] == 0
+    assert all(math.isnan(v) for v in plain.heel_lift_by_cycle)
+    # a shorter base of support holds less before the pressure reaches its edge
+    cap = lambda fa: np.nanmedian([s.metrics["f_capacity_n"] for s in fa.strokes])
+    assert cap(fa) < cap(plain), (cap(fa), cap(plain))
+
+
+def test_implausible_feet_fall_back_to_the_stature_fractions():
+    session, _, log, _ = _inputs()
+    kp, sc = session.keypoints(feet={"heel": 0.025, "toe": 0.30}, seed=11)        # a 54 cm toe
+    fa = _run(session.setup(), log, out="bigfoot", estimator=sf.FakeEstimator(kp, sc)).result.force
+    assert not fa.model.feet_measured
+    assert any(c.startswith("The feet were measured but do not look right") for c in fa.checks)
+
+
+def test_heels_off_the_floor_are_flagged():
+    session, _, log, _ = _inputs()
+    lifted = [5, 6, 7]
+    kp, sc = session.keypoints(feet=FEET, heel_lift={"strokes": lifted, "height_m": 0.06}, seed=11)
+    outcome = _run(session.setup(), log, out="heels", estimator=sf.FakeEstimator(kp, sc))
+    res, fa = outcome.result, outcome.result.force
+    lift_t = [float(np.interp(k + 0.9, session.phase_fine, session.t_fine)) for k in lifted]
+    flagged = []
+    for r in res.reps:
+        span = (res.body.t[r.cycle.start], res.body.t[r.cycle.end])
+        mine = any(span[0] <= x <= span[1] for x in lift_t)
+        v = r.metrics["f_heel_lift_cm"]
+        if r.number in (1, len(res.reps)):                  # stepping in and out: not checked
+            assert math.isnan(v), (r.number, v)
+            continue
+        assert (v >= HEEL_LIFT_CM) == mine, (r.number, v, mine)
+        if mine:
+            assert 5.0 < v < 7.0, v
+            flagged.append(r.number)
+    assert len(flagged) == len(lifted)
+    note = next(c for c in fa.checks if c.startswith("Heels came off the floor"))
+    assert f"on 3 of the {len(res.reps) - 2} strokes checked" in note
+    assert fa.summary["heel_lift_strokes"] == 3
+    with open(outcome.files["forces"]) as fh:
+        f = json.load(fh)
+    lift = np.array([np.nan if v is None else v for v in f["heel_lift_cm"]], float)
+    assert f["feet_measured"] and 5 < np.nanmax(lift) < 7
+    with open(outcome.files["reps"]) as fh:
+        assert "f_heel_lift_cm" in next(csv.reader(fh))
 
 
 def test_without_the_setup_there_is_no_force_model():

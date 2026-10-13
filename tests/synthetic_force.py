@@ -237,8 +237,18 @@ class Session:
     def frame_times(self):
         return np.arange(int(self.duration * FPS)) / FPS
 
-    def keypoints(self):
-        """(frames, 17, 2) pixel keypoints and (frames, 17) scores, noise and misses included."""
+    def keypoints(self, feet=None, drift=(0.0, 0.0), heel_lift=None, step=None, seed=None):
+        """(frames, 17, 2) pixel keypoints and (frames, 17) scores, noise and misses included.
+
+        `feet`: {"heel": h, "toe": t} as fractions of HEIGHT behind / ahead of the ankle on the
+        floor, for a body-with-feet model: the keypoints are then 26 wide (Halpe-26).
+        `drift`: (dx, dy) px the whole picture has moved by the end of the clip, linearly.
+        `heel_lift`: {"strokes": [k, ...], "height_m": m}: the heel rises that far late in the
+        recovery of those strokes (before the next catch), the toes staying down.
+        `step`: {"stroke": k, "back_m": m}: the athlete starts that far forward and steps back
+        into place during stroke k (the whole body moves).
+        `seed`: noise of its own, leaving the session's noise sequence where it was."""
+        rng = self.rng if seed is None else np.random.default_rng(seed)
         t = self.frame_times()
         pts = self.points_at(t)
         px = lambda m: np.stack([ORIGIN[0] + m[..., 0] * SCALE, ORIGIN[1] - m[..., 1] * SCALE], -1)
@@ -255,8 +265,39 @@ class Session:
         kp[:, KP["nose"]] = px(ear + 0.10 * fwd - [0, 0.03])
         kp[:, KP["left_eye"]] = px(ear + 0.08 * fwd + [0, 0.02])
         kp[:, KP["right_eye"]] = kp[:, KP["left_eye"]] + [3, 0]
-        kp += self.rng.normal(0, self.noise_px, kp.shape)
-        miss = self.rng.random(n) < 0.01
+        kp += rng.normal(0, self.noise_px, kp.shape)
+        miss = rng.random(n) < 0.01
+        sc[miss] = 0.1
+        if feet is not None:
+            kp, sc = self._with_feet(kp, sc, t, feet, heel_lift, miss, rng)
+        if step:
+            ph = self.phase_at(t) - step["stroke"]
+            u = np.clip((ph - 0.1) / 0.5, 0, 1)                      # mid-stroke, half a stroke long
+            kp = kp + (step["back_m"] * SCALE * 0.5 * (1 + np.cos(np.pi * u)))[:, None, None] * [1, 0]
+        if any(drift):
+            kp = kp + (t / self.duration)[:, None, None] * np.asarray(drift, float)
+        return kp, sc
+
+    def _with_feet(self, kp, sc, t, feet, heel_lift, miss, rng):
+        n = len(t)
+        kp = np.concatenate([kp, np.zeros((n, 9, 2))], axis=1)
+        sc = np.concatenate([sc, np.full((n, 9), 0.85)], axis=1)
+        heel = np.tile([ORIGIN[0] - feet["heel"] * HEIGHT * SCALE, ORIGIN[1]], (n, 1))
+        toe = np.tile([ORIGIN[0] + feet["toe"] * HEIGHT * SCALE, ORIGIN[1]], (n, 1))
+        if heel_lift:
+            ph = self.phase_at(t)
+            for k in heel_lift["strokes"]:
+                u = np.clip((ph - (k + 0.9)) / 0.08, -1, 1)            # late recovery of stroke k
+                heel[:, 1] -= heel_lift["height_m"] * SCALE * 0.5 * (1 + np.cos(np.pi * u))
+        for side, dx in (("left", 0.0), ("right", 4.0)):
+            kp[:, KP[f"{side}_heel"]] = heel + [dx, -2 if dx else 0]
+            kp[:, KP[f"{side}_big_toe"]] = toe + [dx, -2 if dx else 0]
+            kp[:, KP[f"{side}_small_toe"]] = toe + [dx - 8, -2 if dx else 0]
+        kp[:, KP["neck"]] = (kp[:, KP["left_shoulder"]] + kp[:, KP["right_shoulder"]]) / 2
+        kp[:, KP["mid_hip"]] = (kp[:, KP["left_hip"]] + kp[:, KP["right_hip"]]) / 2
+        kp[:, KP["head"]] = kp[:, KP["left_ear"]] + [0, -25]
+        extra = slice(17, None)
+        kp[:, extra] += rng.normal(0, self.noise_px, kp[:, extra].shape)
         sc[miss] = 0.1
         return kp, sc
 
@@ -264,11 +305,20 @@ class Session:
         kp, sc = self.keypoints()
         return FakeEstimator(kp, sc)
 
-    def write_video(self, path):
-        kp, _ = self.keypoints()
+    def write_video(self, path, drift=(0.0, 0.0), texture=False):
+        """The clip; with `texture`, a still, textured room behind the athlete that the camera's
+        `drift` (px by the end, as in keypoints) moves through the picture."""
+        kp, _ = self.keypoints(drift=drift, seed=None if not texture else 7)
+        room = _room() if texture else None
         vw = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"mp4v"), FPS, (W, H))
+        t = self.frame_times()
         for f in range(len(kp)):
-            img = np.full((H, W, 3), 50, np.uint8)
+            if room is None:
+                img = np.full((H, W, 3), 50, np.uint8)
+            else:
+                d = np.asarray(drift, float) * t[f] / self.duration
+                move = np.float32([[1, 0, d[0] - ROOM_MARGIN], [0, 1, d[1] - ROOM_MARGIN]])
+                img = cv2.warpAffine(room, move, (W, H))
             for a, b in (("shoulder", "elbow"), ("elbow", "wrist"), ("shoulder", "hip"),
                          ("hip", "knee"), ("knee", "ankle")):
                 cv2.line(img, tuple(kp[f, KP[f"left_{a}"]].astype(int)),
@@ -354,6 +404,21 @@ class Session:
             for t, short, payload in rows:
                 fh.write(json.dumps({"t": round(EPOCH + t, 3), "uuid": f"{short:04x}",
                                      "hex": payload.hex()}) + "\n")
+
+
+ROOM_MARGIN = 120
+
+
+def _room():
+    """A still room with plenty of corners for the camera tracker, larger than the picture."""
+    rng = np.random.default_rng(42)
+    room = np.full((H + 2 * ROOM_MARGIN, W + 2 * ROOM_MARGIN, 3), 90, np.uint8)
+    for _ in range(500):
+        x, y = rng.integers(0, room.shape[1]), rng.integers(0, room.shape[0])
+        w, h = rng.integers(6, 40, 2)
+        cv2.rectangle(room, (int(x), int(y)), (int(x + w), int(y + h)),
+                      tuple(int(v) for v in rng.integers(0, 255, 3)), -1)
+    return room
 
 
 class FakeEstimator:

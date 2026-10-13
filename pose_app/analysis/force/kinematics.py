@@ -6,10 +6,20 @@ forwards and backwards (fourth order, no lag), its cut-off corrected for the
 two passes (Winter 2009). 6 Hz keeps the stroke and drops frame-to-frame
 jitter. Positions are in metres in the athlete's plane: x towards the
 machine, y up, origin on the floor under the ankle.
+
+A phone that drifts during the piece moves the whole picture, the machine and
+the feet with it. The camera's motion, measured on the still background
+(analysis/camera.py), is taken out of every track (`camera_matrices`,
+`steady`): the model works in the first frame's camera, where the calibration
+was clicked, and the motion is put back (`unsteady`) to draw over the video.
+
+With a body-with-feet model (Halpe-26) the near heel and big toe are tracked
+too: they give the athlete's own ankle height, heel and toe (`foot_geometry`)
+in place of fractions of stature, and show when the heel leaves the floor.
 """
 
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -22,7 +32,13 @@ CUTOFF_HZ = 6.0
 MAX_GAP_S = 0.3              # bridge missed detections up to this long
 MIN_RUN_S = 0.5              # shorter measured stretches are too short to filter
 TRACKED = ("shoulder", "elbow", "wrist", "hip", "knee", "ankle", "ear")
+FOOT = ("heel", "big_toe")   # tracked too; not measured (NaN) with 17-point models
 STICK_VS_HEIGHT = 0.15       # disagreement between the stick and the height estimate to flag
+CAMERA_CUTOFF_HZ = 0.5       # the camera's measured motion is smoothed to this: a drift, not a shake
+STEP_M = 0.06                # a toe moving more than this within a stroke: the athlete stepped
+MIN_FOOT_SHARE = 0.5         # measured feet need heel, toe and ankle in this share of frames
+# Plausible measured feet, as fractions of stature (Drillis and Contini's are 0.039, 0.035, 0.117)
+FOOT_BOUNDS = {"ankle_h": (0.02, 0.07), "heel": (0.01, 0.06), "toe": (0.06, 0.16)}
 
 
 def lowpass(x: np.ndarray, fs: float, fc: float = CUTOFF_HZ) -> np.ndarray:
@@ -84,7 +100,7 @@ def keypoint_tracks(t: np.ndarray, keypoints: np.ndarray, scores: np.ndarray, si
     """Filtered pixel tracks (N, 2) of the near side's joints and ear."""
     other = "right" if side == "left" else "left"
     out = {}
-    for name in TRACKED:
+    for name in TRACKED + FOOT:
         k = KP[f"{side}_{name}"]
         xy = np.where((scores[:, k] >= min_score)[:, None], keypoints[:, k], np.nan)
         if name == "ear":                       # the far ear when the near one is hidden
@@ -93,6 +109,85 @@ def keypoint_tracks(t: np.ndarray, keypoints: np.ndarray, scores: np.ndarray, si
             xy = np.where(np.isfinite(xy), xy, far)
         out[name] = filtered_track(t, xy.astype(float), fps)
     return out
+
+
+def camera_matrices(camera: Optional[np.ndarray], n: int, fps: float) -> np.ndarray:
+    """(N, 3, 3): first-frame pixels -> each frame's pixels. The sampled transforms
+    (camera.py) between samples, smoothed; the identity without enough of them."""
+    out = np.tile(np.eye(3), (n, 1, 1))
+    if camera is None or len(camera) < n:
+        return out
+    p = np.asarray(camera, float)[:n].reshape(n, 6)
+    ok = np.isfinite(p).all(axis=1)
+    if ok.sum() < 2:
+        return out
+    idx = np.arange(n)
+    q = np.column_stack([np.interp(idx, idx[ok], p[ok, k]) for k in range(6)])
+    out[:, :2, :] = lowpass(q, fps, CAMERA_CUTOFF_HZ).reshape(n, 2, 3)
+    return out @ np.linalg.inv(out[0])            # the first frame exactly as it was clicked
+
+
+def unsteady(m: np.ndarray, xy: np.ndarray) -> np.ndarray:
+    """First-frame pixels (N, 2) -> where they show in each frame (m from camera_matrices)."""
+    return np.einsum("nij,nj->ni", m[:, :2, :2], xy) + m[:, :2, 2]
+
+
+def steady(m: np.ndarray, xy: np.ndarray) -> np.ndarray:
+    """Each frame's pixels (N, 2) -> the first frame's camera."""
+    return unsteady(np.linalg.inv(m), xy)
+
+
+def moved_by(m: np.ndarray, point) -> float:
+    """How far (px) a still point of the first frame wanders in the video at most."""
+    p = np.tile(np.asarray(point, float), (len(m), 1))
+    return float(np.max(np.linalg.norm(unsteady(m, p) - p, axis=1))) if len(m) else 0.0
+
+
+def stepping(tracks: Dict[str, np.ndarray], cycles: Sequence, scale: float) -> list:
+    """Indices of the strokes in which the feet moved (the toe, else the ankle, travelled
+    more than STEP_M, steadied tracks): stepping into or out of position."""
+    p = tracks.get("big_toe")
+    if p is None or not np.isfinite(p).all(axis=1).any():
+        p = tracks["ankle"]
+    out = []
+    for k, c in enumerate(cycles):
+        seg = p[c.start:c.end + 1]
+        seg = seg[np.isfinite(seg).all(axis=1)]
+        if len(seg) >= 3:
+            spread = np.percentile(seg, 95, axis=0) - np.percentile(seg, 5, axis=0)
+            if np.hypot(*spread) / scale > STEP_M:
+                out.append(k)
+    return out
+
+
+def foot_geometry(tracks: Dict[str, np.ndarray], facing: int) -> Optional[Dict[str, float]]:
+    """The near foot in pixels (clip medians, steadied tracks): ankle height above the lower
+    of heel and toe, heel behind and toe ahead of the ankle along the facing direction.
+    None unless heel, toe and ankle are measured together in MIN_FOOT_SHARE of the frames."""
+    a, h, k = (tracks.get(n) for n in ("ankle", "heel", "big_toe"))
+    if a is None or h is None or k is None:
+        return None
+    ok = np.isfinite(a).all(axis=1) & np.isfinite(h).all(axis=1) & np.isfinite(k).all(axis=1)
+    if ok.mean() < MIN_FOOT_SHARE:
+        return None
+    a, h, k = a[ok], h[ok], k[ok]
+    sole = np.maximum(h[:, 1], k[:, 1])              # image y grows downwards
+    return {"ankle_h": float(np.median(sole - a[:, 1])),
+            "heel": float(np.median(facing * (a[:, 0] - h[:, 0]))),
+            "toe": float(np.median(facing * (k[:, 0] - a[:, 0]))),
+            "share": float(ok.mean())}
+
+
+def heel_lift(tracks: Dict[str, np.ndarray], scale: float) -> np.ndarray:
+    """(N,) m: how far the heel stands above the toe, beyond its usual (flat) height.
+    Measured within each frame, so the camera's motion cancels. NaN without the feet."""
+    h, k = tracks.get("heel"), tracks.get("big_toe")
+    if h is None or k is None:
+        return np.full(len(next(iter(tracks.values()))), np.nan)
+    rise = k[:, 1] - h[:, 1]                          # + : the heel above the toe
+    if not np.isfinite(rise).any():
+        return rise
+    return (rise - np.nanmedian(rise)) / scale
 
 
 def _median_length(a: np.ndarray, b: np.ndarray) -> float:
@@ -127,8 +222,9 @@ class ImageFrame:
 
 
 def fit_frame(cal: Calibration, athlete: AthleteProfile, tracks: Dict[str, np.ndarray],
-              facing: int) -> Tuple[Optional[ImageFrame], list]:
-    """The image frame and notes about it; None if the ankle or scale cannot be found."""
+              facing: int, ankle_h_px: Optional[float] = None) -> Tuple[Optional[ImageFrame], list]:
+    """The image frame and notes about it; None if the ankle or scale cannot be found.
+    `ankle_h_px`: the measured ankle height (foot_geometry); else a fraction of stature."""
     notes = []
     lengths = pixel_lengths(tracks)
     by_height = [v / (SEGMENT_H[k] * athlete.height_m) for k, v in lengths.items() if np.isfinite(v)]
@@ -149,7 +245,8 @@ def fit_frame(cal: Calibration, athlete: AthleteProfile, tracks: Dict[str, np.nd
     if not np.isfinite(scale) or not np.isfinite(ankle).any():
         return None, notes + ["The ankle was not measured, so the floor cannot be placed."]
     ax, ay = np.nanmedian(ankle[:, 0]), np.nanmedian(ankle[:, 1])
-    origin = (float(ax), float(ay + ANKLE_H * athlete.height_m * scale))
+    up = ankle_h_px if ankle_h_px is not None else ANKLE_H * athlete.height_m * scale
+    origin = (float(ax), float(ay + up))
     return ImageFrame(float(scale), origin, int(facing), source), notes
 
 
