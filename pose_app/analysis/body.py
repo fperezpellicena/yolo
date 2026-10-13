@@ -32,7 +32,7 @@ def angle_series(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> np.ndarray:
 class BodySeries:
     t: np.ndarray                      # (N,) seconds
     frame_index: np.ndarray            # (N,) index in the source video
-    keypoints: np.ndarray              # (N, 17, 2) smoothed, NaN when unreliable
+    keypoints: np.ndarray              # (N, 26, 2) smoothed, NaN when unreliable or not measured
     side: str                          # "left" / "right": side facing the camera
     facing: int                        # +1 athlete faces image-right, -1 image-left
     torso_px: float                    # median torso length in pixels

@@ -7,10 +7,11 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import numpy as np
 
 from ..person import Person
+from ..skeleton import NUM_KEYPOINTS, pad_keypoints
 from ..pm5 import Pm5Session
 from .body import BodySeries, build_body_series
-from .force import (ForceAnalysis, ForceSetup, StrokeSync, analyze_force, attach_force,
-                    force_drift_rules, force_rules, sync_by_hands)
+from .force import (ForceAnalysis, ForceSetup, StrokeSync, analyze_force, analyze_geometry,
+                    attach_force, force_drift_rules, force_rules, sync_by_hands)
 from .rules import Drift, Fault, Rule, apply_overrides, evaluate_drift
 from .signal import Cycle, find_cycles, hysteresis_thresholds
 from .stations import Station
@@ -35,8 +36,8 @@ class Extraction:
     model: str
     t: np.ndarray                     # (N,)
     frame_index: np.ndarray           # (N,)
-    keypoints: np.ndarray             # (N, 17, 2), NaN when no athlete
-    scores: np.ndarray                # (N, 17), 0 when no athlete
+    keypoints: np.ndarray             # (N, 26, 2), NaN when no athlete or not measured
+    scores: np.ndarray                # (N, 26), 0 when no athlete or not measured
     boxes: np.ndarray                 # (N, 4), NaN when no athlete
     # What the pass depended on (video, clip, athlete choice, model settings), so a later
     # run can tell whether it can reuse it; {} in caches written before it was kept
@@ -55,9 +56,9 @@ class Extraction:
         if int(d["version"]) != CACHE_VERSION:
             raise ValueError("pose cache was written by another version; re-run without --reuse")
         params = json.loads(str(d["params"])) if "params" in d.files else {}
+        kp, sc = pad_keypoints(d["keypoints"], d["scores"])     # 17-point caches: no feet
         return cls(str(d["video_path"]), float(d["fps"]), tuple(int(v) for v in d["frame_size"]),
-                   str(d["model"]), d["t"], d["frame_index"], d["keypoints"],
-                   d["scores"], d["boxes"], params)
+                   str(d["model"]), d["t"], d["frame_index"], kp, sc, d["boxes"], params)
 
 
 def extract(reader: VideoReader, detect: Callable[[np.ndarray], List[Person]],
@@ -71,12 +72,13 @@ def extract(reader: VideoReader, detect: Callable[[np.ndarray], List[Person]],
         ts.append(t)
         idxs.append(index)
         if athlete is None:
-            kps.append(np.full((17, 2), np.nan))
-            scs.append(np.zeros(17))
+            kps.append(np.full((NUM_KEYPOINTS, 2), np.nan))
+            scs.append(np.zeros(NUM_KEYPOINTS))
             boxes.append(np.full(4, np.nan))
         else:
-            kps.append(athlete.keypoints.astype(float))
-            scs.append(athlete.scores.astype(float))
+            kp, sc = pad_keypoints(athlete.keypoints.astype(float), athlete.scores.astype(float))
+            kps.append(kp)
+            scs.append(sc)
             boxes.append(athlete.box.astype(float))
         if on_progress:
             on_progress(n, total)
@@ -113,6 +115,8 @@ class AnalysisResult:
     machine: Optional[MachineAnalysis] = None       # set when telemetry was given
     fps: float = 0.0                # source video; also the annotated video's frame rate
     force: Optional[ForceAnalysis] = None           # set when a PM5 log and a force setup were given
+    # A force setup without a PM5 log: the force model from the video alone (forces.json only)
+    force_geometry: Optional[ForceAnalysis] = None
     rules: List[Rule] = field(default_factory=list) # the rules applied (after overrides)
     pm5: Optional[Pm5Session] = None                # the PM5 log, when one was given
     pm5_sync: Optional[StrokeSync] = None           # its strokes matched to the video's, one by one
@@ -190,6 +194,10 @@ def analyze(ex: Extraction, station: Station, min_score: float = 0.5,
     if telemetry is not None:
         result.machine = analyze_machine(telemetry, alignment, reps, rules)
     result.warnings = _warnings(result)
+    if pm5 is None and force_setup is not None and station.force:
+        result.force_geometry = analyze_geometry(ex.t, ex.keypoints, ex.scores, body, cycles,
+                                                 ex.fps, force_setup, min_score)
+        result.warnings.extend(result.force_geometry.checks)
     return result
 
 

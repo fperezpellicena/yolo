@@ -81,16 +81,16 @@ class Heartbeat:
 class Worker:
     def __init__(self, cfg: WorkerConfig, jobs: JobClient, estimator=None,
                  worker_id: Optional[str] = None):
-        """`estimator` defaults to a PoseEstimator built from `cfg`, loaded once."""
+        """`estimator` defaults to the one `cfg.model` names, loaded once."""
         if not os.path.isdir(cfg.media_root):
             raise SystemExit(f"media root '{cfg.media_root}' is not a folder")
         self.cfg, self.jobs = cfg, jobs
         self.worker_id = worker_id or f"{socket.gethostname()}:{os.getpid()}"
         if estimator is None:
-            from ..estimator import PoseEstimator
+            from ..estimator import load_estimator
             defaults = AnalysisOptions()
-            estimator = PoseEstimator(cfg.model, defaults.conf, cfg.imgsz, cfg.device,
-                                      defaults.kpt_conf)
+            estimator = load_estimator(cfg.model, defaults.conf, cfg.imgsz, cfg.device,
+                                       defaults.kpt_conf)
         self.estimator = estimator
 
     def run(self, stop: threading.Event) -> None:

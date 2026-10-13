@@ -275,11 +275,70 @@ def test_the_force_model_goes_frame_by_frame_into_forces_json():
     fa = res.force
     assert abs(f["moment"]["shoulder"][k] - fa.per_side("shoulder")[k]) < 0.06
     assert all((v is None) == (not np.isfinite(t)) for v, t in zip(f["tension"], fa.tension))
+    # The geometry of the pull: the shoulder's distance to the cord's line, the centre of mass's height
+    from pose_app.analysis.force.dynamics import moment_arm
+    arm = 100 * moment_arm(fa.kin.points["shoulder"], fa.kin.points["grip"], fa.cord_dir)
+    assert np.nanmax(np.abs(arr(f["arm"]["shoulder"]) - arm)) < 0.06
+    assert np.nanmax(np.abs(arr(f["com_height"]) - 100 * fa.kin.body_com[:, 1])) < 0.06
+    # The typical stroke, catch to catch, over every stroke of the analysis
+    assert f["strokes"] == [[r.cycle.start, r.cycle.end] for r in res.reps]
+    typical = f["typical"]
+    assert typical["x"][0] == 0 and typical["x"][-1] == 100 and len(typical["x"]) == 51
+    assert typical["strokes"] == len(res.reps)
+    pull = arr(typical["series"]["tension"]["median"])
+    assert 5 < typical["x"][int(np.nanargmax(pull))] < 45, pull     # the drive opens the stroke
+    assert np.nanmax(pull[30:]) < 0.05 * np.nanmax(pull)            # slack in the recovery
+    for name, band in typical["series"].items():
+        lo, mid, hi = (arr(band[k]) for k in ("low", "median", "high"))
+        assert np.isfinite(mid).all(), name                         # the PM5 knows every point
+        assert (lo <= mid + 0.11).all() and (mid <= hi + 0.11).all(), name
 
 
 def test_without_the_setup_there_is_no_force_model():
     _, _, log, _ = _inputs()
     assert "forces" not in _run(None, log, out="plain").files
+
+
+def test_without_the_pm5_log_the_force_model_is_geometry():
+    session, video, log, _ = _inputs()
+    kp, sc = session.keypoints()                   # both runs see the same keypoints
+    runs = {}
+    for name, pm5 in (("pm5", log), ("geometry", None)):
+        runs[name] = run_analysis(video, os.path.join(_state["dir"], f"model-{name}"),
+                                  AnalysisOptions(model="fake", pm5=pm5, force=session.setup(),
+                                                  video=False), sf.FakeEstimator(kp, sc))
+    geometry = runs["geometry"]
+    assert geometry.result.force is None and geometry.result.pm5 is None
+    with open(geometry.files["summary"]) as fh:
+        assert json.load(fh)["force"] is None       # no force values to report
+    frames = {}
+    for name, outcome in runs.items():
+        with open(outcome.files["forces"]) as fh:
+            frames[name] = json.load(fh)
+    f, p = frames["geometry"], frames["pm5"]
+    assert f["mode"] == "geometry" and p["mode"] == "pm5"
+    assert f["points"] == p["points"] and f["segments"] == p["segments"]
+    # The pull is unknown wherever the cords pull, and so are the forces it changes
+    n = len(f["t"])
+    pulling = [k for k in range(n) if (p["tension"][k] or 0) > 20]
+    assert pulling and all(f["tension"][k] is None for k in pulling)
+    unknown = [k for k in range(n) if f["tension"][k] is None]
+    assert all(f["floor"][2 * k] is None and f["moment"]["hip"][k] is None and
+               f["passed"]["elbow"][2 * k] is None for k in unknown)
+    # Between drives the cords are slack: the forces are the PM5 run's own
+    slack = [k for k in range(n) if f["tension"][k] == 0 and p["tension"][k] == 0]
+    assert len(slack) > n / 3, len(slack)
+    for k in slack:
+        for a, b in ((f["floor"], p["floor"]), (f["passed"]["hip"], p["passed"]["hip"])):
+            assert abs(a[2 * k] - b[2 * k]) <= 1 and abs(a[2 * k + 1] - b[2 * k + 1]) <= 1, k
+        assert abs(f["moment"]["shoulder"][k] - p["moment"]["shoulder"][k]) <= 0.1, k
+    # The geometry is the same; the typical stroke knows the moments only in the recovery
+    assert f["arm"] == p["arm"] and f["com_height"] == p["com_height"]
+    series = f["typical"]["series"]
+    assert series["arm_shoulder"] == p["typical"]["series"]["arm_shoulder"]
+    x = f["typical"]["x"]
+    assert series["shoulder"]["median"][x.index(20)] is None        # mid-drive
+    assert series["shoulder"]["median"][x.index(70)] is not None    # recovery
 
 
 def test_bad_calibration_is_flagged():
@@ -372,8 +431,7 @@ def test_every_pm5_stroke_and_its_curve_go_in_the_summary():
 def test_force_options_are_checked():
     session, video, log, _ = _inputs()
     setup = session.setup()
-    cases = [(AnalysisOptions(force=setup), "invalid_job", "needs the PM5 log"),
-             (AnalysisOptions(force=ForceSetup(AthleteProfile(80, 180), setup.calibration), pm5=log),
+    cases = [(AnalysisOptions(force=ForceSetup(AthleteProfile(80, 180), setup.calibration), pm5=log),
               "invalid_job", "metres, not cm"),
              (AnalysisOptions(pm5=os.path.join(_state["dir"], "none.jsonl")),
               "unreadable_telemetry", "not found")]

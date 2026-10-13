@@ -67,6 +67,8 @@ def write_video(path):
     for kp, sc in FRAMES:
         img = np.full((H, W, 3), 60, np.uint8)
         for a, b in EDGES:
+            if max(KP[a], KP[b]) >= len(kp):        # the synthetic athlete has no feet
+                continue
             cv2.line(img, tuple(kp[KP[a]].astype(int)), tuple(kp[KP[b]].astype(int)), (200,200,200), 6)
         vw.write(img)
     vw.release()

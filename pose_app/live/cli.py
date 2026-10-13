@@ -37,7 +37,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 
     model = p.add_argument_group("model")
     model.add_argument("--model", default="yolo11n-pose.pt",
-                       help="Ultralytics pose weights (n/s/m/l/x, default: yolo11n-pose.pt)")
+                       help="Ultralytics pose weights (n/s/m/l/x, default: yolo11n-pose.pt), "
+                            "or rtmpose-s/-m/-x for RTMPose through rtmlib")
     model.add_argument("--conf", type=float, default=0.5,
                        help="person detection confidence threshold (default: 0.5)")
     model.add_argument("--kpt-conf", type=float, default=0.5,

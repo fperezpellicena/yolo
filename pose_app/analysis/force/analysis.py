@@ -98,6 +98,47 @@ def sync_by_hands(body: BodySeries, cycles: Sequence[Cycle], pm5: Pm5Session,
     return sync
 
 
+def analyze_geometry(t: np.ndarray, keypoints: np.ndarray, scores: np.ndarray, body: BodySeries,
+                     cycles: Sequence[Cycle], fps: float, setup: ForceSetup,
+                     min_score: float = 0.5) -> ForceAnalysis:
+    """The force model from the video alone, without a PM5 log: the body model, the cord's
+    line and the moment arms are geometry. The cords' pull is unknown during each drive
+    (found from the cord's payout), so the forces there are too; between drives the cords
+    are slack and the forces follow from gravity and the body's motion. `pm5` and `sync`
+    are None; `checks` says what the video could not give."""
+    fa = ForceAnalysis(setup, None, None)
+    tracks = keypoint_tracks(t, keypoints, scores, body.side, min_score, fps)
+    frame, notes = fit_frame(setup.calibration, setup.athlete, tracks, body.facing)
+    fa.checks = list(notes)
+    if frame is None:
+        fa.checks.append("Force lines skipped: the athlete's feet were not measured.")
+        return fa
+    lengths_px = pixel_lengths(tracks)
+    lengths = {"forearm_hand": lengths_px["forearm"], **{k: v for k, v in lengths_px.items()
+                                                         if k != "forearm"}}
+    model = BodyModel(setup.athlete, {k: v / frame.scale for k, v in lengths.items()})
+    points = body_points(tracks, frame, model)
+    exit_m = frame.to_m(np.array(setup.calibration.cord_exit, float))
+    to_exit = exit_m[None, :] - points["grip"]
+    L = np.linalg.norm(to_exit, axis=1)
+    u = to_exit / L[:, None]
+    tension = np.zeros(len(t))
+    tension[~np.isfinite(L)] = np.nan
+    for cycle, w in zip(cycles, payout_windows(t, L, cycles, fps)):
+        # Unknown while the cords pull: the drive seen in the payout, or the cycle's first half
+        a, b = (w.start, w.end) if w is not None else (cycle.start, cycle.mid)
+        tension[a:b + 1] = np.nan
+    kin = kinematics(points, t, model)
+    dyn = inverse_dynamics(kin, model, np.nan_to_num(tension, nan=0.0)[:, None] * u)
+    unknown = ~np.isfinite(tension)
+    for values in (dyn.floor, dyn.cop_x, *dyn.moment.values(), *dyn.joint_force.values()):
+        values[unknown] = np.nan
+    fa.frame, fa.model, fa.t, fa.frame_index = frame, model, t, body.frame_index
+    fa.exit_m, fa.cord_dir, fa.tension, fa.kin, fa.dyn = exit_m, u, tension, kin, dyn
+    fa.pixels = {**tracks, "grip": frame.to_px(points["grip"]), "com": frame.to_px(kin.body_com)}
+    return fa
+
+
 def analyze_force(t: np.ndarray, keypoints: np.ndarray, scores: np.ndarray, body: BodySeries,
                   cycles: Sequence[Cycle], fps: float, pm5: Pm5Session, setup: ForceSetup,
                   min_score: float = 0.5, prior: Optional[float] = None,

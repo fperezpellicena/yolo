@@ -12,6 +12,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from ..rtm_estimator import is_rtm_model
 from .force import ForceSetup, force_drift_rules, force_rules
 from .force.frames import write_force_frames
 from .pipeline import AnalysisResult, EmptyClipError, Extraction, analyze, extract
@@ -115,7 +116,7 @@ def run_analysis(video_path: str, out_dir: str, opts: Optional[AnalysisOptions] 
                  estimator=None, on_progress: Optional[ProgressFn] = None) -> AnalysisOutcome:
     """Analyse `video_path` and write report, CSV, JSON, video and pose cache to `out_dir`.
 
-    `estimator` is a loaded PoseEstimator (anything with `.detect(frame)`) so a
+    `estimator` is a loaded estimator (anything with `.detect(frame)`) so a
     long-lived caller loads the model once; when omitted one is built from
     `opts`. Its settings must then match `opts.model` and `opts.kpt_conf`.
     """
@@ -131,8 +132,6 @@ def run_analysis(video_path: str, out_dir: str, opts: Optional[AnalysisOptions] 
             raise AnalysisError("invalid_job", "Invalid force setup: " + "; ".join(problems) + ".")
         if not station.force:
             raise AnalysisError("invalid_job", f"Force analysis is not available for {station.name}.")
-        if not opts.pm5:
-            raise AnalysisError("invalid_job", "Force analysis needs the PM5 log of the piece.")
     pm5 = _load_pm5(opts.pm5) if opts.pm5 else None
     try:
         reader = VideoReader(video_path, opts.start, opts.end, opts.rotate)
@@ -164,9 +163,12 @@ def run_analysis(video_path: str, out_dir: str, opts: Optional[AnalysisOptions] 
 
     write_json(res, files["summary"])
     # The force model frame by frame, for a page to draw over the video
-    if res.force is not None:
+    # (from the video alone without a PM5 log)
+    model = res.force or res.force_geometry
+    if model is not None:
         forces = os.path.join(out_dir, OUTPUT_FILES["forces"])
-        if write_force_frames(res.force, forces, ex.fps, ex.frame_size):
+        if write_force_frames(model, forces, ex.fps, ex.frame_size,
+                              [r.cycle for r in res.reps]):
             files["forces"] = forces
     if opts.csv:
         files["reps"] = os.path.join(out_dir, OUTPUT_FILES["reps"])
@@ -219,6 +221,10 @@ def pose_params(video_path: str, opts: AnalysisOptions) -> Dict[str, Any]:
     for key in CLIP_KEYS + MODEL_KEYS:
         value = getattr(opts, key)
         params[key] = [float(v) for v in value] if isinstance(value, (tuple, list)) else value
+    if is_rtm_model(opts.model):
+        # RTMPose caches keep the feet since the Halpe-26 layout; earlier ones (17 points)
+        # lack this key, so they are not reused as if they had them
+        params["keypoints"] = "halpe26"
     return params
 
 
@@ -255,8 +261,8 @@ def _extraction(reader: VideoReader, opts: AnalysisOptions, cache: str, estimato
             log.info("Not reusing the previous pose pass: made with another " +
                      ", ".join(changed) + ".")
     if estimator is None:
-        from ..estimator import PoseEstimator
-        estimator = PoseEstimator(opts.model, opts.conf, opts.imgsz, opts.device, opts.kpt_conf)
+        from ..estimator import load_estimator
+        estimator = load_estimator(opts.model, opts.conf, opts.imgsz, opts.device, opts.kpt_conf)
     info = reader.info
     tracker = AthleteTracker(opts.athlete, opts.athlete_point, (info.width, info.height))
     try:

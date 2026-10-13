@@ -65,6 +65,36 @@ If other people are in shot, the largest person is followed by default; use
 defaults favour accuracy (`yolo11m-pose.pt`, `--imgsz 960`); on a CPU-only
 machine use `--model yolo11s-pose.pt --imgsz 640` for speed.
 
+### RTMPose instead of Ultralytics (trial)
+
+`--model rtmpose-s`, `rtmpose-m` (or `rtmpose`) and `rtmpose-x` run RTMPose
+through [rtmlib](https://github.com/Tau-J/rtmlib), on ONNX Runtime and without
+mmcv/mmpose: `pip install -r requirements-rtm.txt`. The same names work for the
+live app and as `WORKER_MODEL`. rtmlib downloads the models on first use.
+
+| name | detector | pose model | speed |
+|---|---|---|---|
+| `rtmpose-s` | YOLOX-tiny 416 | RTMPose-s 256x192 | fastest |
+| `rtmpose-m` | YOLOX-m 640 | RTMPose-m 256x192 | balanced |
+| `rtmpose-x` | YOLOX-x 640 | RTMPose-x 384x288 | most accurate |
+
+* The models are Halpe-26 (body with feet): the COCO-17 points, then head,
+  neck, mid-hip and each foot's big toe, small toe and heel. All 26 are kept
+  in the pose cache and the feet are drawn in the annotated video; the
+  analysis does not use them yet. With a 17-point model (YOLO) the extra
+  points are stored as not measured. RTMPose caches made before the feet
+  were kept are re-run rather than reused (`--reuse` still takes them).
+* `--imgsz` does not apply: each model has a fixed input size.
+* `--conf` is the detector's person score.
+* Keypoint scores are RTMPose's SimCC responses, not the same scale as
+  YOLO's. `--kpt-conf 0.5` may be stricter or looser than with YOLO; compare
+  the share of frames kept before trusting the comparison (rtmlib's own
+  examples use about 0.3 to 0.45).
+* `--infer-device`: empty picks CUDA when ONNX Runtime has it, else the CPU;
+  `0` means `cuda:0`; `mps` uses Core ML.
+* The model name is part of the pose cache, so switching backends re-runs
+  the pose pass instead of reusing the other model's keypoints.
+
 
 ### Force analysis (SkiErg with a Concept2 PM5)
 
@@ -89,6 +119,15 @@ takes the same as JSON:
     {"athlete": {"mass_kg": 80, "height_m": 1.80, "sex": "male"},
      "calibration": {"cord_exit": [612, 88],
                      "scale": {"points": [[402, 905], [398, 602]], "length_m": 1.0}}}
+
+Without `--pm5`, the setup gives the force model from the video alone:
+forces.json in `"mode": "geometry"`, and nothing else force-related (no
+`force` section, `f_*` metrics, force rules or force lines on annotated.mp4).
+The body model, the cord's line and the moment arms are geometry, so they are
+there in every frame. The cords' pull is unknown during each drive (found from
+the cord's payout), so `tension`, `passed`, `floor`, `cop_x` and `moment` are
+null there. Between drives the cords are slack, and those forces follow from
+gravity and the body's motion as with the PM5 log.
 
 What it adds:
 
@@ -322,7 +361,8 @@ analysed frame's pixels (the uploaded video as displayed: x right, y down),
 forces in newtons in the same directions, both sides of the body together;
 pairs are flattened `[x0, y0, x1, y1, ...]` and a missing value is null.
 
-* Once: `version` (1), `fps`, `frame_size`, `px_per_m`, `facing`, `mass_kg`,
+* Once: `version` (1), `mode` (`pm5`, or `geometry` without the PM5 log: see
+  above), `fps`, `frame_size`, `px_per_m`, `facing`, `mass_kg`,
   `weight_n`, `cord_exit`, `floor_y`, `fixed_points` (ankle, heel and toe: the
   feet are flat and still in the model), `feet` (mass and centre of mass),
   `segments` (name, the points it joins, its mass, its centre of mass as a
@@ -337,6 +377,17 @@ pairs are flattened `[x0, y0, x1, y1, ...]` and a missing value is null.
   the floor), `floor` (the floor's force on the feet) and `cop_x` (where it
   acts on the floor line), and `moment` (per side, positive as the first of
   `moment_names`).
+* Also per frame, the geometry of the pull: `arm` (the shoulder's and the
+  elbow's distance to the cord's line, cm) and `com_height` (the body's centre
+  of mass above the floor, cm). Both are known without the PM5 log.
+* `strokes`: each stroke as `[first, last]` sample, catch to catch.
+* `typical`: every series through the typical stroke, for a chart of it.
+  `x` runs from 0 to 100% of the stroke in 51 points; for each series
+  (the five joints' moments, `tension`, `floor` (its size), `arm_shoulder`,
+  `arm_elbow`, `com_height`) it gives the `median` and the middle half of the
+  strokes (`low` and `high`: the 25th and 75th percentiles). A point is null
+  when fewer than three strokes have a value there, as for the forces during
+  the drive without the PM5 log.
 
 The hip, knee and ankle values and the floor reaction are estimates, as in
 the report: one side-on camera does not measure them well enough until a
@@ -350,7 +401,8 @@ seek the player straight to a rep or a fault.
 
 Regression tests (no model needed): `python tests/test_skierg.py`,
 `python tests/test_telemetry.py`, `python tests/test_api.py`,
-`python tests/test_pm5.py`, `python tests/test_force.py` (a synthetic athlete
+`python tests/test_pm5.py`, `python tests/test_estimator.py` (the rtmlib
+backend, against a stand-in rtmlib), `python tests/test_force.py` (a synthetic athlete
 with known physics and its PM5 log; see `tests/synthetic_force.py`) and
 `python tests/test_worker.py` (against an in-memory fake of the web app's API).
 
@@ -391,8 +443,9 @@ each run's keypoints as `.npz`. Defaults match the worker (960 px input,
         bench_pose.py           pose model benchmark: speed, jitter, agreement
     pose_app/
         estimator.py            shared: PoseEstimator: YOLO -> Person records + overlay
+        rtm_estimator.py        shared: the same through rtmlib (RTMPose, ONNX)
         person.py               shared: Person dataclass
-        skeleton.py             shared: COCO-17 keypoints and ANGLE_DEFS
+        skeleton.py             shared: Halpe-26 keypoints (COCO-17 first) and ANGLE_DEFS
         geometry.py             shared: angle maths
         drawing/                shared: OpenCV drawing helpers
             text.py             scalable text + translucent box helpers
