@@ -2,14 +2,19 @@
 """
 bench_pose.py - benchmark pose models for the SkiErg worker, on CPU or GPU.
 
-For every video, it runs each combination of model, export format, mode (full
-frame or cropped to the athlete) and frame stride, and measures:
+It compares Ultralytics YOLO pose models (yolo11m-pose.pt, ...) with RTMPose
+through rtmlib (rtmpose-s, rtmpose-m, rtmpose-x: the worker's model names).
+For every video, it runs each combination of model, export format (rtmlib
+backend for RTMPose), mode and frame stride, and measures:
 
   speed       ms per analysed frame (decode, inference, end to end), how many
               times slower than real time the pose pass runs, and the projected
-              pose-pass time for a 4.5-minute piece at this video's resolution
+              pose-pass time for a 4.5-minute piece at this video's resolution.
+              For RTMPose, inference is split between the person detector and
+              the pose model, and detector % is how many frames ran the detector.
   detection   share of analysed frames where the athlete was found
-  confidence  mean keypoint confidence over the 12 body joints
+  confidence  mean keypoint confidence over the 12 body joints (YOLO and RTMPose
+              scores are on different scales: compare within a family)
   jitter      per-frame keypoint noise of the body joints, as a % of torso
               length, estimated from the residual of the worker's own zero-lag
               filter (lowpass() in pose_app/analysis/force/kinematics.py) and
@@ -21,21 +26,48 @@ frame or cropped to the athlete) and frame stride, and measures:
   agreement   mean keypoint distance to a reference run, as a % of torso
               length, and PCK@10% (share of joints within 10% of torso length)
 
-No ground truth is needed. The reference run is the largest model listed (or
---reference), on the full frame, every frame; agreement with it stands in for
-accuracy, and jitter measures the noise the force model would see.
+Modes:
+  full   as the worker runs today. YOLO: one pass over the whole frame.
+         RTMPose: the person detector (YOLOX) over the whole frame, then the
+         pose model on every person it finds.
+  crop   follow the athlete. YOLO: the model on a crop around the athlete's
+         last box, at --crop-imgsz, and on the full frame when the crop finds
+         no one. RTMPose: the pose model alone, on a box around the athlete's
+         keypoints in the previous analysed frame (as rtmlib's PoseTracker
+         does); the detector runs again every --rtm-redetect analysed frames
+         and whenever the athlete is lost. The detector is most of RTMPose's
+         cost, so this is the mode that would make it affordable.
+
+No ground truth is needed. Each family has its own reference run: the largest
+YOLO model listed and the largest RTMPose model listed, on the full frame,
+every frame. Agreement with it stands in for accuracy, and jitter measures the
+noise the force model would see. --reference sets one reference for all runs;
+across families, agreement then also counts the models' different keypoint
+definitions (the hips above all), not only error.
 
 Setup (from the repo root):
   pip install -r requirements.txt
+  pip install -r requirements-rtm.txt  # RTMPose: rtmlib and onnxruntime
   pip install onnxruntime        # for --formats onnx
-  pip install openvino           # for --formats openvino (best on Intel CPUs)
+  pip install openvino           # for --formats openvino and --rtm-backends openvino
+                                 # (best on Intel CPUs)
 
-Defaults match the worker: 960 px input on the full frame (WORKER_IMGSZ),
-the 6 Hz force filter, and yolo11m-pose.pt among the models compared.
+Defaults match the worker: 960 px YOLO input on the full frame (WORKER_IMGSZ),
+the 6 Hz force filter, yolo11m-pose.pt and rtmpose-m among the models compared.
+RTMPose models have fixed input sizes; rtmlib downloads them on first use.
+Without rtmlib installed, the default run leaves RTMPose out (with a note).
 
 Examples:
-  # Quick look: the first 60 s of each video, YOLO11 vs YOLO26, s and m sizes
+  # Quick look: the first 60 s of each video, YOLO11 vs YOLO26 (s and m), RTMPose-m
   python tools/bench_pose.py videos/*.mp4 --device cpu
+
+  # YOLO vs RTMPose on CPU; crop runs RTMPose's detector on 1 frame in 10
+  python tools/bench_pose.py videos/*.mp4 --device cpu \\
+      --models yolo11m-pose.pt yolo26m-pose.pt rtmpose-s rtmpose-m --modes full crop
+
+  # RTMPose on each rtmlib backend
+  python tools/bench_pose.py session1.mp4 --models rtmpose-m \\
+      --rtm-backends onnxruntime openvino opencv
 
   # Full grid on the target server
   python tools/bench_pose.py session1.mp4 session2.mp4 \\
@@ -47,7 +79,8 @@ Examples:
   python tools/bench_pose.py session1.mp4 --device 0 --formats pt engine
 
 Outputs (in --out): results.csv, results.json (with machine details), and with
---save-keypoints one .npz of keypoints per run, for feeding into the worker.
+--save-keypoints one .npz of keypoints per run (17 COCO points for YOLO, the 26
+Halpe points for RTMPose), for feeding into the worker.
 
 Notes:
   - Times are for one process. For throughput on a many-core server, run one
@@ -57,6 +90,7 @@ Notes:
   - OpenCV applies the phone's rotation metadata when it decodes.
   - The athlete is picked as the person overlapping the previous frame's box,
     else the largest one: close to, but not, the worker's AthleteTracker.
+  - --threads also sets ONNX Runtime's and OpenVINO's threads for RTMPose on CPU.
 """
 
 from __future__ import annotations
@@ -78,12 +112,15 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))   # the repo root, for pose_app
 from pose_app.analysis.force.kinematics import CUTOFF_HZ, lowpass  # noqa: E402
+from pose_app.rtm_estimator import RTM_MODELS, is_rtm_model, rtm_device  # noqa: E402
 
 BODY = list(range(5, 17))  # COCO: shoulders, elbows, wrists, hips, knees, ankles
 L_SH, R_SH, L_HIP, R_HIP = 5, 6, 11, 12
 SIZE_RANK = {"n": 0, "s": 1, "m": 2, "l": 3, "x": 4}
 TARGET_SECONDS = 270.0  # a 4.5-minute SkiErg piece
 WARMUP = 3
+DEFAULT_MODELS = ["yolo11s-pose.pt", "yolo11m-pose.pt", "yolo26s-pose.pt", "yolo26m-pose.pt", "rtmpose-m"]
+TRACK_EXPAND = 1.25  # RTMPose crop mode: box around the last keypoints, grown as rtmlib's PoseTracker does
 
 
 # --------------------------------------------------------------------------- args
@@ -94,20 +131,28 @@ def parse_args(argv=None):
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("videos", nargs="+", help="video files to analyse")
-    p.add_argument("--models", nargs="+",
-                   default=["yolo11s-pose.pt", "yolo11m-pose.pt", "yolo26s-pose.pt", "yolo26m-pose.pt"],
-                   help="pose model weights (downloaded on first use)")
+    p.add_argument("--models", nargs="+", default=None,
+                   help="YOLO pose weights and/or RTMPose models (rtmpose-s, rtmpose-m, rtmpose-x), "
+                        "downloaded on first use (default: " + " ".join(DEFAULT_MODELS) + ")")
     p.add_argument("--reference", default=None,
-                   help="model for the reference run (default: the largest of --models)")
+                   help="model for one reference run for all (default: the largest of each family)")
     p.add_argument("--modes", nargs="+", default=["full", "crop"], choices=["full", "crop"])
     p.add_argument("--strides", nargs="+", type=int, default=[1, 2],
                    help="analyse every Nth frame (1 = every frame)")
     p.add_argument("--formats", nargs="+", default=["pt"], choices=["pt", "onnx", "openvino", "engine"],
-                   help="pt = PyTorch; onnx, openvino and engine (TensorRT) are exported once and cached")
+                   help="YOLO: pt = PyTorch; onnx, openvino and engine (TensorRT) are exported once "
+                        "and cached")
+    p.add_argument("--rtm-backends", nargs="+", default=["onnxruntime"],
+                   choices=["onnxruntime", "openvino", "opencv"],
+                   help="RTMPose: rtmlib backends to run (the worker uses onnxruntime)")
+    p.add_argument("--rtm-redetect", type=int, default=10,
+                   help="RTMPose crop mode: run the person detector every Nth analysed frame "
+                        "(0 = only when the athlete is lost)")
     p.add_argument("--device", default="cpu", help="cpu, or a GPU index such as 0")
     p.add_argument("--imgsz", type=int, default=960,
-                   help="model input size on the full frame (the worker's default is 960)")
-    p.add_argument("--crop-imgsz", type=int, default=640, help="model input size on the crop")
+                   help="YOLO input size on the full frame (the worker's default is 960); "
+                        "RTMPose models have fixed sizes")
+    p.add_argument("--crop-imgsz", type=int, default=640, help="YOLO input size on the crop")
     p.add_argument("--crop-margin", type=float, default=0.25,
                    help="margin added on each side of the athlete box, as a share of its longer side")
     p.add_argument("--conf", type=float, default=0.25, help="detection confidence threshold")
@@ -122,7 +167,11 @@ def parse_args(argv=None):
     p.add_argument("--out", default="bench_results", help="output folder")
     p.add_argument("--export-dir", default="bench_exports", help="where exported models are cached")
     p.add_argument("--save-keypoints", action="store_true", help="save each run's keypoints as .npz")
-    return p.parse_args(argv)
+    args = p.parse_args(argv)
+    args.default_models = args.models is None
+    if args.models is None:
+        args.models = list(DEFAULT_MODELS)
+    return args
 
 
 # ------------------------------------------------------------------ environment
@@ -142,7 +191,7 @@ def machine_info():
                     break
     except OSError:
         pass
-    for mod in ("torch", "ultralytics", "cv2", "onnxruntime", "openvino"):
+    for mod in ("torch", "ultralytics", "cv2", "rtmlib", "onnxruntime", "openvino"):
         try:
             m = __import__(mod)
             info[mod] = getattr(m, "__version__", "installed")
@@ -160,25 +209,85 @@ def machine_info():
 
 # ----------------------------------------------------------------------- models
 
+def family(name):
+    return "rtm" if is_rtm_model(name) else "yolo"
+
+
 def model_rank(name):
+    if is_rtm_model(name):
+        size = name.strip().lower().partition("-")[2] or "m"   # plain "rtmpose" is rtmpose-m
+        return (SIZE_RANK[size], 0)
     m = re.search(r"(\d+)([nsmlx])-pose", Path(name).stem)
     if not m:
         return (-1, -1)
     return (SIZE_RANK[m.group(2)], int(m.group(1)))
 
 
-class ModelCache:
-    """Loads each (weights, format, input size) once; exports non-PyTorch formats on first use."""
+def rtm_backend_device(backend, device):
+    """Our --device as each rtmlib backend names it."""
+    dev = rtm_device(device)                     # cpu, cuda, cuda:N or mps (onnxruntime's names)
+    if backend == "opencv":
+        return "cuda" if dev.startswith("cuda") else "cpu"
+    if backend == "openvino":
+        return "gpu" if dev.startswith("cuda") else ("cpu" if dev == "mps" else dev)
+    return dev
 
-    def __init__(self, export_dir, device):
+
+def set_rtm_threads(model, threads, device):
+    """Rebuild an rtmlib model's CPU session with `threads` threads (OpenCV: cv2.setNumThreads)."""
+    if model.backend == "onnxruntime":
+        import onnxruntime as ort
+        so = ort.SessionOptions()
+        so.intra_op_num_threads = threads
+        so.inter_op_num_threads = 1
+        model.session = ort.InferenceSession(model.onnx_model, sess_options=so,
+                                             providers=model.session.get_providers())
+    elif model.backend == "openvino":
+        from openvino import Core
+        core = Core()
+        net = core.read_model(model=model.onnx_model)
+        compiled = core.compile_model(model=net, device_name=device.upper(), config={
+            "PERFORMANCE_HINT": "LATENCY", "INFERENCE_NUM_THREADS": threads})
+        model.compiled_model = compiled
+        model.input_layer = compiled.input(0)
+        if hasattr(model, "_ov_outputs"):
+            model._ov_outputs = [compiled.output(i) for i in range(len(net.outputs))]
+        if hasattr(model, "output_layer"):
+            model.output_layer = compiled.output(0)
+
+
+class ModelCache:
+    """Loads each (weights, format, input size) once; exports non-PyTorch formats on first use.
+    RTMPose models load once per (model, backend), as (detector, pose model)."""
+
+    def __init__(self, export_dir, device, conf=0.25, threads=None):
         self.export_dir = Path(export_dir)
         self.device = device
+        self.conf = conf
+        self.threads = threads
         self.models = {}
 
     def get(self, weights, fmt, imgsz):
         key = (weights, fmt, imgsz if fmt != "pt" else 0)
         if key not in self.models:
             self.models[key] = self._load(weights, fmt, imgsz)
+        return self.models[key]
+
+    def get_rtm(self, name, backend):
+        key = ("rtm", name.strip().lower(), backend)
+        if key not in self.models:
+            from rtmlib import BodyWithFeet
+            dev = rtm_backend_device(backend, self.device)
+            solution = BodyWithFeet(mode=RTM_MODELS[key[1]], backend=backend, device=dev)
+            det, pose = solution.det_model, solution.pose_model
+            det.score_thr = self.conf                    # as the worker sets it
+            if self.threads and dev == "cpu":
+                for m in (det, pose):
+                    try:
+                        set_rtm_threads(m, self.threads, dev)
+                    except Exception as e:               # keep the backend's own default
+                        print(f"  could not set {backend} threads: {e}", flush=True)
+            self.models[key] = (det, pose)
         return self.models[key]
 
     def _load(self, weights, fmt, imgsz):
@@ -262,17 +371,154 @@ def crop_needs_update(box, crop, W, H):
     return near or loose
 
 
+def pose_box(kxy, kc, thr, W, H, expand=TRACK_EXPAND):
+    """The box around the confident keypoints, grown by `expand` about its centre and kept in
+    the frame: where RTMPose looks for the athlete in the next frame. None if too few points."""
+    ok = kc >= thr
+    if ok.sum() < 4:
+        return None
+    (x0, y0), (x1, y1) = kxy[ok].min(0), kxy[ok].max(0)
+    cx, cy, hw, hh = (x0 + x1) / 2, (y0 + y1) / 2, (x1 - x0) / 2 * expand, (y1 - y0) / 2 * expand
+    box = np.array([max(cx - hw, 0.0), max(cy - hh, 0.0), min(cx + hw, W), min(cy + hh, H)])
+    return box if box[2] - box[0] >= 8 and box[3] - box[1] >= 8 else None
+
+
+def athlete_lost(kc, thr):
+    """Fewer than half the body joints found: the tracked box no longer holds the athlete."""
+    return int((kc[BODY] >= thr).sum()) < len(BODY) // 2
+
+
 # ------------------------------------------------------------------------- runs
 
 def predict(model, img, imgsz, args):
     return model.predict(img, imgsz=imgsz, device=args.device, conf=args.conf, verbose=False)[0]
 
 
+class YoloRunner:
+    """One Ultralytics model, full frame or cropped to the athlete. Call it on each analysed
+    frame: (keypoints, confidences) of the athlete, or None."""
+
+    def __init__(self, cfg, cache, args, W, H):
+        self.args, self.mode, self.W, self.H = args, cfg["mode"], W, H
+        self.m_full = cache.get(cfg["model"], cfg["format"], args.imgsz)
+        self.m_crop = cache.get(cfg["model"], cfg["format"], args.crop_imgsz) if self.mode == "crop" else None
+        self.crop, self.prev_box, self.misses = None, None, 0
+        self.full_passes = self.fallbacks = 0
+        self.t_det = self.t_pose = None              # one model: no split
+
+    def warmup(self, frame):
+        for _ in range(WARMUP):
+            predict(self.m_full, frame, self.args.imgsz, self.args)
+            if self.m_crop is not None:
+                predict(self.m_crop, np.ascontiguousarray(frame[: self.H // 2, : self.W // 2]),
+                        self.args.crop_imgsz, self.args)
+
+    def __call__(self, frame):
+        args, det = self.args, None
+        if self.mode == "crop" and self.crop is not None:
+            x0, y0, x1, y1 = self.crop
+            det = extract(predict(self.m_crop, np.ascontiguousarray(frame[y0:y1, x0:x1]),
+                                  args.crop_imgsz, args), x0, y0)
+            if det is None:
+                self.fallbacks += 1
+        if det is None:
+            self.full_passes += 1
+            det = extract(predict(self.m_full, frame, args.imgsz, args))
+        if det is None:
+            self.misses += 1
+            self.crop = None
+            if self.misses >= 5:
+                self.prev_box = None
+            return None
+        self.misses = 0
+        i = pick_athlete(det, self.prev_box)
+        box = det[0][i]
+        self.prev_box = box
+        if self.mode == "crop" and (self.crop is None or crop_needs_update(box, self.crop, self.W, self.H)):
+            self.crop = make_crop(box, self.W, self.H, args.crop_margin)
+        return det[2][i], det[3][i]
+
+
+class RtmRunner:
+    """RTMPose through rtmlib: a person detector, then the pose model on a box.
+
+    full: the detector on every analysed frame, then the pose model on every person found,
+          as the worker's RtmPoseEstimator does.
+    crop: the pose model alone on the box around the athlete's previous keypoints; the
+          detector again every --rtm-redetect analysed frames, and whenever the box loses
+          the athlete (a fallback, on the same frame).
+    """
+
+    def __init__(self, cfg, cache, args, W, H):
+        self.args, self.mode, self.W, self.H = args, cfg["mode"], W, H
+        self.det, self.pose = cache.get_rtm(cfg["model"], cfg["format"])
+        self.track, self.since_det = None, 0
+        self.prev_box, self.misses = None, 0
+        self.full_passes = self.fallbacks = 0
+        self.t_det = self.t_pose = 0.0
+
+    def warmup(self, frame):
+        box = np.array([[0, 0, self.W / 2, self.H]], float)
+        for _ in range(WARMUP):
+            self.det(frame)
+            self.pose(frame, bboxes=box)
+
+    def _detect(self, frame):
+        t = time.perf_counter()
+        boxes = np.asarray(self.det(frame), dtype=np.float64).reshape(-1, 4)
+        self.t_det += time.perf_counter() - t
+        self.full_passes += 1
+        return boxes
+
+    def _pose(self, frame, boxes):
+        t = time.perf_counter()
+        kxy, kc = self.pose(frame, bboxes=boxes)
+        self.t_pose += time.perf_counter() - t
+        n = len(boxes)
+        return (np.asarray(kxy, dtype=np.float64).reshape(n, -1, 2),
+                np.asarray(kc, dtype=np.float64).reshape(n, -1))
+
+    def _from_detector(self, frame):
+        boxes = self._detect(frame)
+        if len(boxes) == 0:
+            return None
+        i = pick_athlete((boxes, np.ones(len(boxes))), self.prev_box)
+        if self.mode == "full":
+            kxy, kc = self._pose(frame, boxes)
+            return boxes[i], kxy[i], kc[i]
+        kxy, kc = self._pose(frame, boxes[i:i + 1])
+        return boxes[i], kxy[0], kc[0]
+
+    def __call__(self, frame):
+        thr, res = self.args.kpt_conf, None
+        redetect = self.args.rtm_redetect
+        if self.mode == "crop" and self.track is not None and (redetect <= 0 or self.since_det < redetect):
+            kxy, kc = self._pose(frame, self.track[None])
+            if athlete_lost(kc[0], thr):
+                self.fallbacks += 1
+            else:
+                res = (self.track, kxy[0], kc[0])
+                self.since_det += 1
+        if res is None:
+            res = self._from_detector(frame)
+            self.since_det = 1
+        if res is None:
+            self.misses += 1
+            self.track = None
+            if self.misses >= 5:
+                self.prev_box = None
+            return None
+        self.misses = 0
+        box, kxy, kc = res
+        self.prev_box = box
+        if self.mode == "crop":
+            self.track = pose_box(kxy, kc, thr, self.W, self.H)
+        return kxy, kc
+
+
 def run_config(video, cfg, cache, args):
     import cv2
-    fmt, weights, mode, stride = cfg["format"], cfg["model"], cfg["mode"], cfg["stride"]
-    m_full = cache.get(weights, fmt, args.imgsz)
-    m_crop = cache.get(weights, fmt, args.crop_imgsz) if mode == "crop" else None
+    stride = cfg["stride"]
 
     # Warm up on the first frame, outside the timed loop.
     cap = cv2.VideoCapture(video)
@@ -283,10 +529,8 @@ def run_config(video, cfg, cache, args):
     if not ok:
         raise RuntimeError("cannot read the video")
     H, W = frame.shape[:2]
-    for _ in range(WARMUP):
-        predict(m_full, frame, args.imgsz, args)
-        if m_crop is not None:
-            predict(m_crop, np.ascontiguousarray(frame[: H // 2, : W // 2]), args.crop_imgsz, args)
+    runner = (RtmRunner if family(cfg["model"]) == "rtm" else YoloRunner)(cfg, cache, args, W, H)
+    runner.warmup(frame)
 
     cap = cv2.VideoCapture(video)
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
@@ -294,10 +538,9 @@ def run_config(video, cfg, cache, args):
         cap.set(cv2.CAP_PROP_POS_MSEC, args.start_seconds * 1000)
     max_src = int(args.max_seconds * fps) if args.max_seconds else None
 
-    records = {}  # source frame index -> (t, kxy (17,2), kc (17,))
+    records = {}  # source frame index -> (t, kxy (K,2), kc (K,)); K = 17 (YOLO) or 26 (RTMPose)
     kept_idx, kept_t = [], []
     t_decode = t_infer = 0.0
-    crop, prev_box, misses, fallbacks = None, None, 0, 0
     src = 0
     wall0 = time.perf_counter()
     while max_src is None or src < max_src:
@@ -316,29 +559,10 @@ def run_config(video, cfg, cache, args):
         kept_idx.append(src); kept_t.append(t)
 
         ti = time.perf_counter()
-        det = None
-        if mode == "crop" and crop is not None:
-            x0, y0, x1, y1 = crop
-            det = extract(predict(m_crop, np.ascontiguousarray(frame[y0:y1, x0:x1]), args.crop_imgsz, args), x0, y0)
-            if det is None:
-                fallbacks += 1
-        if det is None:
-            det = extract(predict(m_full, frame, args.imgsz, args))
+        found = runner(frame)
         t_infer += time.perf_counter() - ti
-
-        if det is None:
-            misses += 1
-            crop = None
-            if misses >= 5:
-                prev_box = None
-        else:
-            misses = 0
-            i = pick_athlete(det, prev_box)
-            box = det[0][i]
-            records[src] = (t, det[2][i], det[3][i])
-            prev_box = box
-            if mode == "crop" and (crop is None or crop_needs_update(box, crop, W, H)):
-                crop = make_crop(box, W, H, args.crop_margin)
+        if found is not None:
+            records[src] = (t, found[0], found[1])
         src += 1
     wall = time.perf_counter() - wall0
     cap.release()
@@ -348,16 +572,21 @@ def run_config(video, cfg, cache, args):
         raise RuntimeError("no frames analysed")
     video_seconds = src / fps
     rt = wall / video_seconds
+    ms = lambda s: None if s is None else round(1000 * s / n, 1)  # noqa: E731
     out = {
         "frames_analysed": n,
         "video_seconds": round(video_seconds, 2),
         "resolution": f"{W}x{H}",
         "fps": round(fps, 2),
+        "keypoints": len(next(iter(records.values()))[1]) if records else None,
         "detect_pct": round(100 * len(records) / n, 1),
-        "crop_fallbacks": fallbacks if mode == "crop" else None,
-        "decode_ms_per_frame": round(1000 * t_decode / n, 1),
-        "infer_ms_per_frame": round(1000 * t_infer / n, 1),
-        "total_ms_per_frame": round(1000 * wall / n, 1),
+        "crop_fallbacks": runner.fallbacks if cfg["mode"] == "crop" else None,
+        "detector_pct": round(100 * runner.full_passes / n, 1),
+        "decode_ms_per_frame": ms(t_decode),
+        "infer_ms_per_frame": ms(t_infer),
+        "det_ms_per_frame": ms(runner.t_det),
+        "pose_ms_per_frame": ms(runner.t_pose),
+        "total_ms_per_frame": ms(wall),
         "x_realtime": round(rt, 2),
         "projected_min_4m30": round(rt * TARGET_SECONDS / 60, 1),
     }
@@ -391,13 +620,14 @@ def quality(records, kept_idx, fs, args):
     conf = np.mean([r[2][BODY].mean() for r in records.values()])
     torso = np.nanmedian([torso_length(r[1], r[2], thr) for r in records.values()])
 
-    # Positions on the analysed-frame grid, NaN where missing or low confidence.
+    # Positions on the analysed-frame grid, NaN where missing or low confidence. The COCO 17
+    # come first in RTMPose's Halpe 26 too, so both families are measured on the same joints.
     xy = np.full((len(kept_idx), 17, 2), np.nan)
     for row, idx in enumerate(kept_idx):
         rec = records.get(idx)
         if rec is not None:
-            ok = rec[2] >= thr
-            xy[row, ok] = rec[1][ok]
+            ok = rec[2][:17] >= thr
+            xy[row, ok] = rec[1][:17][ok]
 
     # The worker's own zero-lag filter, so "filtered" is what the force model really sees.
     fc = min(args.cutoff_hz, 0.3 * fs)                  # lowpass() caps the cutoff the same way
@@ -452,19 +682,21 @@ def agreement(records, ref, thr):
 
 # ------------------------------------------------------------------------- main
 
-COLUMNS = ["video", "model", "format", "mode", "stride", "is_reference", "resolution", "fps",
-           "frames_analysed", "video_seconds", "detect_pct", "crop_fallbacks",
-           "decode_ms_per_frame", "infer_ms_per_frame", "total_ms_per_frame", "x_realtime",
+COLUMNS = ["video", "model", "format", "mode", "stride", "is_reference", "reference", "resolution", "fps",
+           "frames_analysed", "video_seconds", "keypoints", "detect_pct", "crop_fallbacks", "detector_pct",
+           "decode_ms_per_frame", "infer_ms_per_frame", "det_ms_per_frame", "pose_ms_per_frame",
+           "total_ms_per_frame", "x_realtime",
            "projected_min_4m30", "kpt_conf", "torso_px", "jitter_pct", "filtered_noise_pct", "jitter_note",
            "err_pct_vs_ref", "pck10_vs_ref", "joints_compared", "error"]
 
 
 def print_table(rows):
-    head = ["video", "model", "fmt", "mode", "str", "det%", "inf ms", "tot ms", "xRT",
-            "4m30 min", "conf", "jit%", "filt%", "err%", "PCK10"]
-    keys = ["video", "model", "format", "mode", "stride", "detect_pct", "infer_ms_per_frame",
-            "total_ms_per_frame", "x_realtime", "projected_min_4m30", "kpt_conf", "jitter_pct",
-            "filtered_noise_pct", "err_pct_vs_ref", "pck10_vs_ref"]
+    head = ["video", "model", "fmt", "mode", "str", "found%", "det run%", "inf ms", "det ms", "pose ms",
+            "tot ms", "xRT", "4m30 min", "conf", "jit%", "filt%", "err%", "PCK10"]
+    keys = ["video", "model", "format", "mode", "stride", "detect_pct", "detector_pct", "infer_ms_per_frame",
+            "det_ms_per_frame", "pose_ms_per_frame", "total_ms_per_frame", "x_realtime",
+            "projected_min_4m30", "kpt_conf", "jitter_pct", "filtered_noise_pct", "err_pct_vs_ref",
+            "pck10_vs_ref"]
     table = [head]
     for r in rows:
         cells = []
@@ -483,16 +715,73 @@ def print_table(rows):
             print("  ".join("-" * w for w in widths))
 
 
+def check_dependencies(args):
+    """Exit with an install hint when a listed model's library is missing. Without rtmlib, the
+    default model list just leaves RTMPose out, with a note."""
+    def missing(module):
+        try:
+            __import__(module)
+            return None
+        except ImportError as e:
+            return str(e)
+
+    if missing("cv2"):
+        sys.exit("Missing dependency: OpenCV. Install with: pip install -r requirements.txt")
+    used = list(args.models) + ([args.reference] if args.reference else [])
+    if any(family(m) == "rtm" for m in used):
+        problems = [p for p in [missing("rtmlib")] + [missing(b) for b in args.rtm_backends if b != "opencv"] if p]
+        if problems:
+            hint = "pip install -r requirements-rtm.txt" + (
+                " (and pip install openvino)" if "openvino" in args.rtm_backends else "")
+            if args.default_models and not (args.reference and family(args.reference) == "rtm"):
+                args.models = [m for m in args.models if family(m) != "rtm"]
+                print(f"Note: leaving RTMPose out ({'; '.join(problems)}). To include it: {hint}\n")
+            else:
+                sys.exit(f"Missing dependency for RTMPose: {'; '.join(problems)}. Install with: {hint}")
+    used = list(args.models) + ([args.reference] if args.reference else [])
+    if any(family(m) == "yolo" for m in used) and missing("ultralytics"):
+        sys.exit("Missing dependency: ultralytics. Install with: pip install -r requirements.txt")
+
+
+def reference_cfgs(args):
+    """{family: its reference run}: the largest model of each family listed, full frame, every
+    frame; with --reference, that one run for both."""
+    def cfg(model):
+        if family(model) == "rtm":
+            fmt = args.rtm_backends[0]
+        else:
+            fmt = "pt" if "pt" in args.formats else args.formats[0]
+        return {"model": model, "format": fmt, "mode": "full", "stride": 1}
+
+    if args.reference:
+        one = cfg(args.reference)
+        return {"yolo": one, "rtm": one}
+    refs = {}
+    for fam in ("yolo", "rtm"):
+        listed = [m for m in args.models if family(m) == fam]
+        if listed:
+            refs[fam] = cfg(max(listed, key=model_rank))
+    return refs
+
+
+def run_grid(args):
+    """Every model x format (rtmlib backend for RTMPose) x mode x stride."""
+    grid = []
+    for m in args.models:
+        fmts = args.rtm_backends if family(m) == "rtm" else args.formats
+        grid += [{"model": m, "format": f, "mode": mo, "stride": s}
+                 for f in fmts for mo in args.modes for s in args.strides]
+    return grid
+
+
 def main(argv=None):
     args = parse_args(argv)
     if args.threads:
         os.environ["OMP_NUM_THREADS"] = str(args.threads)
-    try:
-        import cv2  # noqa: F401
-        from ultralytics import YOLO  # noqa: F401
-    except ImportError as e:
-        sys.exit(f"Missing dependency: {e}. Install with: pip install -r requirements.txt")
+    check_dependencies(args)
     if args.threads:
+        import cv2
+        cv2.setNumThreads(args.threads)
         try:
             import torch
             torch.set_num_threads(args.threads)
@@ -501,46 +790,52 @@ def main(argv=None):
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
-    ref_model = args.reference or max(args.models, key=model_rank)
-    ref_fmt = "pt" if "pt" in args.formats else args.formats[0]
-    ref_cfg = {"model": ref_model, "format": ref_fmt, "mode": "full", "stride": 1}
-    grid = [{"model": m, "format": f, "mode": mo, "stride": s}
-            for f in args.formats for m in args.models for mo in args.modes for s in args.strides]
-    grid = [c for c in grid if c != ref_cfg]
+    refs = reference_cfgs(args)
+    ref_list = []
+    for c in refs.values():
+        if c not in ref_list:
+            ref_list.append(c)
+    grid = [c for c in run_grid(args) if c not in ref_list]
+    name = lambda c: f"{c['model']} {c['format']}"  # noqa: E731
 
     info = machine_info()
     print(f"Machine: {info.get('cpu')} ({info.get('logical_cpus')} logical CPUs)"
           + (f", GPU {info['gpu']}" if info.get("gpu") else "") + f"; device {args.device}")
-    print(f"Reference: {ref_model}, {ref_fmt}, full frame, every frame\n")
+    print(f"Reference: {'; '.join(name(c) for c in ref_list)} (full frame, every frame)\n")
 
-    cache = ModelCache(args.export_dir, args.device)
+    cache = ModelCache(args.export_dir, args.device, conf=args.conf, threads=args.threads)
     rows = []
     for video in args.videos:
-        ref_records = None
-        for cfg in [ref_cfg] + grid:
-            is_ref = cfg is ref_cfg
+        ref_records = {}
+        for cfg in ref_list + grid:
+            is_ref = cfg in ref_list
+            ref = cfg if is_ref else refs[family(cfg["model"])]
             label = f"{Path(video).name}: {cfg['model']} {cfg['format']} {cfg['mode']} stride {cfg['stride']}"
             print(f"> {label}{' (reference)' if is_ref else ''}", flush=True)
-            row = {"video": video, **cfg, "is_reference": is_ref, "error": None}
+            row = {"video": video, **cfg, "is_reference": is_ref, "reference": name(ref), "error": None}
             try:
                 stats, records, (idx, ts) = run_config(video, cfg, cache, args)
                 row.update(stats)
                 if is_ref:
-                    ref_records = records
+                    ref_records[name(cfg)] = records
                     row.update({"err_pct_vs_ref": 0.0, "pck10_vs_ref": 100.0,
                                 "joints_compared": sum(int((r[2][BODY] >= args.kpt_conf).sum())
                                                        for r in records.values())})
-                elif ref_records is not None:
-                    row.update(agreement(records, ref_records, args.kpt_conf))
+                elif name(ref) in ref_records:
+                    row.update(agreement(records, ref_records[name(ref)], args.kpt_conf))
                 if args.save_keypoints:
                     keys = sorted(records)
+                    npts = len(records[keys[0]][1]) if keys else 17
                     np.savez_compressed(
                         out_dir / f"{Path(video).stem}__{Path(cfg['model']).stem}_{cfg['format']}_{cfg['mode']}_s{cfg['stride']}.npz",
                         analysed_frames=idx, analysed_t=ts, frame=np.array(keys),
                         t=np.array([records[k][0] for k in keys]),
-                        kxy=np.array([records[k][1] for k in keys]).reshape(-1, 17, 2),
-                        kconf=np.array([records[k][2] for k in keys]).reshape(-1, 17))
-                print(f"  {row['total_ms_per_frame']} ms/frame, {row['x_realtime']}x real time, "
+                        kxy=np.array([records[k][1] for k in keys]).reshape(-1, npts, 2),
+                        kconf=np.array([records[k][2] for k in keys]).reshape(-1, npts),
+                        layout="halpe26" if npts == 26 else "coco17")
+                split = (f" (detector {row['det_ms_per_frame']} ms on {row['detector_pct']}% of frames, "
+                         f"pose {row['pose_ms_per_frame']} ms)") if row.get("det_ms_per_frame") is not None else ""
+                print(f"  {row['total_ms_per_frame']} ms/frame{split}, {row['x_realtime']}x real time, "
                       f"~{row['projected_min_4m30']} min per 4.5-min piece, jitter {row.get('jitter_pct')}%, "
                       f"filtered {row.get('filtered_noise_pct')}%, PCK10 {row.get('pck10_vs_ref')}%", flush=True)
             except Exception as e:  # keep going with the other runs

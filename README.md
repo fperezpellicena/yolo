@@ -416,22 +416,37 @@ full-screen-capable view: original feed | pose overlay | joint-angle panel.
 ## Benchmarking pose models
 
 `tools/bench_pose.py` compares pose models on real videos before a model,
-crop or hosting change: YOLO11 against YOLO26, CPU against GPU, PyTorch
-against ONNX or OpenVINO, the full frame against a crop around the athlete,
-and every frame against every second frame. It needs no ground truth.
+crop or hosting change: YOLO11 against YOLO26 against RTMPose, CPU against
+GPU, PyTorch against ONNX or OpenVINO (rtmlib's backends for RTMPose), the
+full frame against following the athlete, and every frame against every
+second frame. It needs no ground truth.
 
     python tools/bench_pose.py videos/*.mp4 --device cpu
     python tools/bench_pose.py session.mp4 \
         --models yolo11m-pose.pt yolo26s-pose.pt yolo26m-pose.pt \
         --reference yolo26x-pose.pt --formats pt openvino --max-seconds 90 --save-keypoints
+    python tools/bench_pose.py session.mp4 --models yolo11m-pose.pt rtmpose-s rtmpose-m \
+        --rtm-backends onnxruntime openvino --modes full crop
 
 For each run it reports milliseconds per frame, the projected pose-pass time
 for a 4.5-minute piece, detection rate, keypoint noise (corrected for frame
 rate), the noise left after the force model's own filter, and agreement with
-the reference run (the largest model on every full frame). Results go to
-`bench_results/results.csv` and `results.json`; `--save-keypoints` also keeps
-each run's keypoints as `.npz`. Defaults match the worker (960 px input,
-6 Hz filter). `python tools/bench_pose.py --help` lists every option.
+the reference run (the largest model of the family on every full frame).
+Results go to `bench_results/results.csv` and `results.json`;
+`--save-keypoints` also keeps each run's keypoints as `.npz`. Defaults match
+the worker (960 px YOLO input, 6 Hz filter). `python tools/bench_pose.py
+--help` lists every option.
+
+RTMPose (`rtmpose-s`, `rtmpose-m`, `rtmpose-x`, needs `requirements-rtm.txt`)
+runs two models: a person detector, then the pose model on each person's box.
+Its times are split between the two, with the share of frames that ran the
+detector. In `full` mode the detector runs on every frame, as the worker does
+today; in `crop` mode the pose model follows the athlete from the previous
+frame's keypoints and the detector runs only every `--rtm-redetect` frames
+(10 by default) or when the athlete is lost. RTMPose is compared with its own
+reference (the largest RTMPose listed); with `--reference` set to a YOLO
+model, its agreement also counts the two models' different hip and knee
+definitions, not only error.
 
 ## Project layout
 
