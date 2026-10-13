@@ -47,7 +47,8 @@ class Fault:
 
 @dataclass(frozen=True)
 class DriftRule:
-    """Compares the first and last third of the set (fatigue)."""
+    """Compares the first and last third of the set (fatigue), by their medians so one
+    odd rep (the first pull from standing still, a misread frame) cannot swing it."""
     id: str
     metric: str
     direction: str              # "increase" | "decrease" is the bad direction
@@ -75,10 +76,13 @@ def evaluate_drift(rules: Sequence[DriftRule], reps: List[Dict[str, float]]) -> 
     third = len(reps) // 3
     out = []
     for r in rules:
-        def mean(chunk):
-            vals = [x[r.metric] for x in chunk if math.isfinite(x.get(r.metric, math.nan))]
-            return sum(vals) / len(vals) if vals else math.nan
-        early, late = mean(reps[:third]), mean(reps[-third:])
+        def typical(chunk):
+            vals = sorted(x[r.metric] for x in chunk if math.isfinite(x.get(r.metric, math.nan)))
+            if not vals:
+                return math.nan
+            mid = len(vals) // 2
+            return vals[mid] if len(vals) % 2 else (vals[mid - 1] + vals[mid]) / 2
+        early, late = typical(reps[:third]), typical(reps[-third:])
         if not (math.isfinite(early) and math.isfinite(late)):
             continue
         change = late - early
