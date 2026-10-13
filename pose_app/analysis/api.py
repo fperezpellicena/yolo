@@ -15,7 +15,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from ..rtm_estimator import is_rtm_model
 from .force import ForceSetup, force_drift_rules, force_rules
 from .force.frames import write_force_frames
-from .pipeline import AnalysisResult, EmptyClipError, Extraction, analyze, extract
+from .pipeline import AnalysisResult, EmptyClipError, Extraction, add_camera, analyze, extract
 from .report import write_csv, write_html, write_json
 from .stations import STATIONS
 from .telemetry import Telemetry, machine_drift_rules
@@ -148,6 +148,11 @@ def run_analysis(video_path: str, out_dir: str, opts: Optional[AnalysisOptions] 
 
     ex = _extraction(reader, opts, files["pose_cache"], estimator, on_progress,
                      pose_params(video_path, opts))
+    if ex.camera is None and opts.force is not None:
+        # a pose pass from before the camera was measured: the force model needs it
+        log.info("Measuring the camera's motion (pose cache from an earlier version).")
+        add_camera(ex, reader)
+        ex.save(files["pose_cache"])
     res = analyze(ex, station, opts.kpt_conf, opts.thresholds, telemetry, opts.telemetry_offset,
                   pm5, opts.force)
     if res.machine is not None:

@@ -41,7 +41,7 @@ def draw_force(img: np.ndarray, fa, i: int, s: float) -> None:
     if fa.tension is None or fa.frame is None:
         return
     px = fa.pixels
-    exit_px = np.asarray(fa.setup.calibration.cord_exit, float)
+    exit_px = fa.exit_px(i)                     # follows a drifting camera
     grip, com = px["grip"][i], px["com"][i]
     lw = max(1, int(round(2 * s)))
     cv2.circle(img, _pt(exit_px), max(3, int(5 * s)), CORD, -1, AA)
