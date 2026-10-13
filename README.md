@@ -78,9 +78,12 @@ live app and as `WORKER_MODEL`. rtmlib downloads the models on first use.
 | `rtmpose-m` | YOLOX-m 640 | RTMPose-m 256x192 | balanced |
 | `rtmpose-x` | YOLOX-x 640 | RTMPose-x 384x288 | most accurate |
 
-* The models are Halpe-26 (body with feet). Only their first 17 points, the
-  COCO-17 points the rest of the app uses, are kept for now; heels and toes
-  are dropped.
+* The models are Halpe-26 (body with feet): the COCO-17 points, then head,
+  neck, mid-hip and each foot's big toe, small toe and heel. All 26 are kept
+  in the pose cache and the feet are drawn in the annotated video; the
+  analysis does not use them yet. With a 17-point model (YOLO) the extra
+  points are stored as not measured. RTMPose caches made before the feet
+  were kept are re-run rather than reused (`--reuse` still takes them).
 * `--imgsz` does not apply: each model has a fixed input size.
 * `--conf` is the detector's person score.
 * Keypoint scores are RTMPose's SimCC responses, not the same scale as
@@ -420,7 +423,7 @@ full-screen-capable view: original feed | pose overlay | joint-angle panel.
         estimator.py            shared: PoseEstimator: YOLO -> Person records + overlay
         rtm_estimator.py        shared: the same through rtmlib (RTMPose, ONNX)
         person.py               shared: Person dataclass
-        skeleton.py             shared: COCO-17 keypoints and ANGLE_DEFS
+        skeleton.py             shared: Halpe-26 keypoints (COCO-17 first) and ANGLE_DEFS
         geometry.py             shared: angle maths
         drawing/                shared: OpenCV drawing helpers
             text.py             scalable text + translucent box helpers

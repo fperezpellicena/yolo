@@ -7,6 +7,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import numpy as np
 
 from ..person import Person
+from ..skeleton import NUM_KEYPOINTS, pad_keypoints
 from ..pm5 import Pm5Session
 from .body import BodySeries, build_body_series
 from .force import (ForceAnalysis, ForceSetup, StrokeSync, analyze_force, analyze_geometry,
@@ -35,8 +36,8 @@ class Extraction:
     model: str
     t: np.ndarray                     # (N,)
     frame_index: np.ndarray           # (N,)
-    keypoints: np.ndarray             # (N, 17, 2), NaN when no athlete
-    scores: np.ndarray                # (N, 17), 0 when no athlete
+    keypoints: np.ndarray             # (N, 26, 2), NaN when no athlete or not measured
+    scores: np.ndarray                # (N, 26), 0 when no athlete or not measured
     boxes: np.ndarray                 # (N, 4), NaN when no athlete
     # What the pass depended on (video, clip, athlete choice, model settings), so a later
     # run can tell whether it can reuse it; {} in caches written before it was kept
@@ -55,9 +56,9 @@ class Extraction:
         if int(d["version"]) != CACHE_VERSION:
             raise ValueError("pose cache was written by another version; re-run without --reuse")
         params = json.loads(str(d["params"])) if "params" in d.files else {}
+        kp, sc = pad_keypoints(d["keypoints"], d["scores"])     # 17-point caches: no feet
         return cls(str(d["video_path"]), float(d["fps"]), tuple(int(v) for v in d["frame_size"]),
-                   str(d["model"]), d["t"], d["frame_index"], d["keypoints"],
-                   d["scores"], d["boxes"], params)
+                   str(d["model"]), d["t"], d["frame_index"], kp, sc, d["boxes"], params)
 
 
 def extract(reader: VideoReader, detect: Callable[[np.ndarray], List[Person]],
@@ -71,12 +72,13 @@ def extract(reader: VideoReader, detect: Callable[[np.ndarray], List[Person]],
         ts.append(t)
         idxs.append(index)
         if athlete is None:
-            kps.append(np.full((17, 2), np.nan))
-            scs.append(np.zeros(17))
+            kps.append(np.full((NUM_KEYPOINTS, 2), np.nan))
+            scs.append(np.zeros(NUM_KEYPOINTS))
             boxes.append(np.full(4, np.nan))
         else:
-            kps.append(athlete.keypoints.astype(float))
-            scs.append(athlete.scores.astype(float))
+            kp, sc = pad_keypoints(athlete.keypoints.astype(float), athlete.scores.astype(float))
+            kps.append(kp)
+            scs.append(sc)
             boxes.append(athlete.box.astype(float))
         if on_progress:
             on_progress(n, total)

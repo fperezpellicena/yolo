@@ -2,15 +2,30 @@
 
 Run: python tests/test_estimator.py (or pytest). Needs neither rtmlib nor a model:
 a fake `rtmlib` module answers like BodyWithFeet's detector and pose model,
-from the synthetic SkiErg athlete, with nine extra Halpe-26 points per person.
+from the synthetic SkiErg athlete, with the nine extra Halpe-26 points (head, neck,
+mid-hip, toes and heels) added from its COCO-17 points.
 """
-import os, sys, tempfile, types
+import json, os, sys, tempfile, types
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
 
 from synthetic_skierg import FakeEstimator, KINDS, write_video
+from pose_app.skeleton import KP, NUM_KEYPOINTS
+
+
+def halpe_extra(kp):
+    """(17, 2) COCO points -> the (9, 2) Halpe-26 extras, in skeleton.HALPE_EXTRA order."""
+    la, ra = kp[KP["left_ankle"]], kp[KP["right_ankle"]]
+    return np.array([
+        kp[KP["nose"]] + [0, -40],                                       # head
+        (kp[KP["left_shoulder"]] + kp[KP["right_shoulder"]]) / 2,       # neck
+        (kp[KP["left_hip"]] + kp[KP["right_hip"]]) / 2,                 # mid-hip
+        la + [60, 12], ra + [60, 12],                                   # big toes
+        la + [50, 14], ra + [50, 14],                                   # small toes
+        la + [-20, 14], ra + [-20, 14],                                 # heels
+    ])
 
 
 class StubDetector:
@@ -31,9 +46,9 @@ class StubPose:
         assert len(bboxes) == len(self.det.people) > 0, "pose model run without detections"
         kp = np.array([p.keypoints for p in self.det.people], dtype=np.float32)
         sc = np.array([p.scores for p in self.det.people], dtype=np.float32)
-        n = len(kp)   # Halpe-26: nine more points after COCO-17, here obviously wrong
-        kp = np.concatenate([kp, np.full((n, 9, 2), -999.0, np.float32)], axis=1)
-        sc = np.concatenate([sc, np.full((n, 9), 0.99, np.float32)], axis=1)
+        extra = np.array([halpe_extra(k) for k in kp], dtype=np.float32)
+        kp = np.concatenate([kp, extra], axis=1)
+        sc = np.concatenate([sc, np.full((len(kp), 9), 0.8, np.float32)], axis=1)
         return kp, sc
 
 
@@ -61,7 +76,7 @@ def test_model_names_and_devices():
     assert rtm_device(None) in ("cpu", "cuda")
 
 
-def test_detect_keeps_coco17_and_sorts_largest_first():
+def test_detect_keeps_all_26_points_and_sorts_largest_first():
     fake = FakeEstimator()
     made = install_stub_rtmlib(fake.detect)
     from pose_app.estimator import load_estimator
@@ -71,8 +86,9 @@ def test_detect_keeps_coco17_and_sorts_largest_first():
 
     people = est.detect(np.zeros((720, 1280, 3), np.uint8))
     assert len(people) == 2
-    assert all(p.keypoints.shape == (17, 2) and p.scores.shape == (17,) for p in people)
-    assert not (people[0].keypoints == -999).any()
+    assert all(p.keypoints.shape == (26, 2) and p.scores.shape == (26,) for p in people)
+    heel = people[0].keypoints[KP["left_heel"]]
+    assert np.allclose(heel, people[0].keypoints[KP["left_ankle"]] + [-20, 14])
     assert people[0].area > people[1].area
     assert any(v is not None for v in people[0].angles.values())
 
@@ -100,9 +116,40 @@ def test_run_analysis_through_the_rtmlib_backend():
         install_stub_rtmlib(FakeEstimator().detect)
         rtm = run_analysis(video, os.path.join(d, "rtm"), AnalysisOptions(model="rtmpose-m", **opts))
         assert len(rtm.result.reps) == len(yolo.result.reps) == len(KINDS)
-        assert np.allclose(rtm.result.body.keypoints, yolo.result.body.keypoints, equal_nan=True)
+        body_r, body_y = rtm.result.body.keypoints, yolo.result.body.keypoints
+        assert body_r.shape[1] == body_y.shape[1] == NUM_KEYPOINTS
+        assert np.allclose(body_r[:, :17], body_y[:, :17], equal_nan=True)
+        assert np.isnan(body_y[:, 17:]).all()                   # 17-point models: no feet
+        assert np.isfinite(body_r[:, KP["left_heel"]]).mean() > 0.9
         with np.load(rtm.files["pose_cache"]) as cache:     # the model is part of the cache
             assert str(cache["model"]) == "rtmpose-m"
+            assert cache["keypoints"].shape[1:] == (NUM_KEYPOINTS, 2)
+            assert json.loads(str(cache["params"]))["keypoints"] == "halpe26"
+
+
+def test_a_17_point_cache_loads_without_feet():
+    from pose_app.analysis.pipeline import Extraction
+    n = 5
+    old = Extraction("v.mp4", 30.0, (960, 720), "yolo11m-pose.pt", np.arange(n) / 30, np.arange(n),
+                     np.ones((n, 17, 2)), np.full((n, 17), 0.9), np.ones((n, 4)), {})
+    with tempfile.TemporaryDirectory() as d:
+        old.save(os.path.join(d, "c.npz"))
+        ex = Extraction.load(os.path.join(d, "c.npz"))
+    assert ex.keypoints.shape == (n, NUM_KEYPOINTS, 2) and ex.scores.shape == (n, NUM_KEYPOINTS)
+    assert (ex.keypoints[:, :17] == 1).all() and np.isnan(ex.keypoints[:, 17:]).all()
+    assert (ex.scores[:, 17:] == 0).all()
+
+
+def test_an_rtmpose_cache_from_before_the_feet_is_not_reused():
+    from pose_app.analysis.api import AnalysisOptions, _changed, pose_params
+    with tempfile.TemporaryDirectory() as d:
+        video = os.path.join(d, "v.mp4")
+        open(video, "wb").write(b"x" * 10)
+        rtm = pose_params(video, AnalysisOptions(model="rtmpose-m"))
+        yolo = pose_params(video, AnalysisOptions(model="yolo11m-pose.pt"))
+    before = {k: v for k, v in rtm.items() if k != "keypoints"}     # trimmed to 17 points
+    assert _changed(before, rtm, tuple(rtm)) == ["keypoints"]
+    assert "keypoints" not in yolo                                   # YOLO caches still reused
 
 
 if __name__ == "__main__":

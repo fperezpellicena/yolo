@@ -12,6 +12,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from ..rtm_estimator import is_rtm_model
 from .force import ForceSetup, force_drift_rules, force_rules
 from .force.frames import write_force_frames
 from .pipeline import AnalysisResult, EmptyClipError, Extraction, analyze, extract
@@ -220,6 +221,10 @@ def pose_params(video_path: str, opts: AnalysisOptions) -> Dict[str, Any]:
     for key in CLIP_KEYS + MODEL_KEYS:
         value = getattr(opts, key)
         params[key] = [float(v) for v in value] if isinstance(value, (tuple, list)) else value
+    if is_rtm_model(opts.model):
+        # RTMPose caches keep the feet since the Halpe-26 layout; earlier ones (17 points)
+        # lack this key, so they are not reused as if they had them
+        params["keypoints"] = "halpe26"
     return params
 
 

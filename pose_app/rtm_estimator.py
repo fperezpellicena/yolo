@@ -1,10 +1,9 @@
 """RTMPose inference through rtmlib (ONNX, no mmcv), turned into Person records.
 
 A drop-in alternative to the Ultralytics PoseEstimator: same `estimate()` and
-`detect()`, same Person records. It runs the Halpe-26 body-with-feet models,
-whose first 17 keypoints are the COCO-17 points in COCO order; the other nine
-(head, neck, mid-hip, big toe, small toe and heel on each side) are dropped
-here, so nothing downstream changes. Keeping them is a later step.
+`detect()`, same Person records. It runs the Halpe-26 body-with-feet models:
+the COCO-17 points in COCO order, then head, neck, mid-hip and each foot's big
+toe, small toe and heel (skeleton.KEYPOINT_NAMES). All 26 are kept.
 
 Model names (the `--model` / MODEL value):
     rtmpose-s   lightweight: YOLOX-tiny detector, RTMPose-s 256x192
@@ -21,8 +20,6 @@ import numpy as np
 from .geometry import compute_angles
 from .person import Person
 from .skeleton import EDGES, KP
-
-COCO17 = 17
 
 # model name -> rtmlib BodyWithFeet mode
 RTM_MODELS = {
@@ -90,10 +87,9 @@ class RtmPoseEstimator:
 
 def people_from_arrays(boxes: np.ndarray, keypoints: np.ndarray, scores: np.ndarray,
                        min_keypoint_score: float) -> List[Person]:
-    """rtmlib's (N, 4) boxes, (N, K, 2) keypoints and (N, K) scores, K >= 17, as Person
-    records holding the COCO-17 points."""
-    kp = np.asarray(keypoints, dtype=np.float32)[:, :COCO17]
-    sc = np.asarray(scores, dtype=np.float32)[:, :COCO17]
+    """rtmlib's (N, 4) boxes, (N, 26, 2) keypoints and (N, 26) scores as Person records."""
+    kp = np.asarray(keypoints, dtype=np.float32)
+    sc = np.asarray(scores, dtype=np.float32)
     people = [
         Person(box=np.asarray(boxes[i], dtype=np.float32), keypoints=kp[i], scores=sc[i],
                angles=compute_angles(kp[i], sc[i], min_keypoint_score))
