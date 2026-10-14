@@ -14,7 +14,8 @@ import numpy as np
 import synthetic_force as sf
 from pose_app.analysis.api import AnalysisError, AnalysisOptions, default_thresholds, run_analysis
 from pose_app.analysis.force import ForceSetup
-from pose_app.analysis.force.analysis import HEEL_LIFT_CM
+from pose_app.analysis.feet import LIFT_CM
+from pose_app.analysis.stations.skierg import heel_windows
 from pose_app.analysis.force.dynamics import cross, static_capacity
 from pose_app.analysis.force.kinematics import _pass, _pass_numpy, lowpass
 from pose_app.analysis.force.model import BodyModel
@@ -382,13 +383,15 @@ def test_stepping_into_place_is_not_a_moving_camera():
     machine, and the heel check leaves that stroke out."""
     session, video, log, _ = _inputs()
     kp, sc = session.keypoints(feet=FEET, step={"stroke": 0, "back_m": 0.15}, seed=11)
-    fa = _run(session.setup(), log, out="step", estimator=sf.FakeEstimator(kp, sc)).result.force
+    res = _run(session.setup(), log, out="step", estimator=sf.FakeEstimator(kp, sc)).result
+    fa = res.force
     assert fa.stepping == [0], fa.stepping
     assert np.allclose(fa.camera, np.eye(3))                  # the camera was not moved
     assert not any(c.startswith("The camera moved") for c in fa.checks)
     assert any(c.startswith("The feet moved (stepping) during stroke 1.") for c in fa.checks)
-    assert math.isnan(fa.heel_lift_by_cycle[0]) and math.isfinite(fa.heel_lift_by_cycle[1])
-    assert math.isnan(fa.heel_lift_by_cycle[-1])                # the last stroke: stepping out
+    heel = [r.metrics["heel_lift_catch"] for r in res.reps]
+    assert math.isnan(heel[0]) and math.isfinite(heel[1])
+    assert math.isnan(heel[-1])                                  # the last stroke: stepping out
 
 
 def test_measured_feet_set_the_floor_and_the_base_of_support():
@@ -401,10 +404,11 @@ def test_measured_feet_set_the_floor_and_the_base_of_support():
     assert abs(m.ankle_h - sf.LEN["ankle_h"] * H) < 0.005             # floor where the soles are
     assert fa.summary["feet_measured"] == 1 and abs(fa.summary["heel_cm"] - 4.5) < 0.5
     assert not any(c.startswith(("The camera moved", "Heels", "The feet")) for c in fa.checks)
-    plain = _run(session.setup(), log).result.force                       # 17 points: no feet
+    plain_res = _run(session.setup(), log).result                         # 17 points: no feet
+    plain = plain_res.force
     assert not plain.model.feet_measured and plain.feet_source == "height"
-    assert plain.summary["feet_measured"] == 0
-    assert all(math.isnan(v) for v in plain.heel_lift_by_cycle)
+    assert plain.summary["feet_measured"] == 0 and math.isnan(plain.summary["heel_lift_strokes"])
+    assert all(math.isnan(r.metrics["heel_lift_catch"]) for r in plain_res.reps)
     # a shorter base of support holds less before the pressure reaches its edge
     cap = lambda fa: np.nanmedian([s.metrics["f_capacity_n"] for s in fa.strokes])
     assert cap(fa) < cap(plain), (cap(fa), cap(plain))
@@ -419,34 +423,41 @@ def test_implausible_feet_fall_back_to_the_stature_fractions():
 
 
 def test_heels_off_the_floor_are_flagged():
+    """The heel rises 6 cm late in the recovery of three strokes: the technique analysis reads
+    it around the next catch (its heel metrics), and the force model, which takes the feet as
+    flat, says so and exports the same lift frame by frame."""
     session, _, log, _ = _inputs()
     lifted = [5, 6, 7]
     kp, sc = session.keypoints(feet=FEET, heel_lift={"strokes": lifted, "height_m": 0.06}, seed=11)
     outcome = _run(session.setup(), log, out="heels", estimator=sf.FakeEstimator(kp, sc))
     res, fa = outcome.result, outcome.result.force
     lift_t = [float(np.interp(k + 0.9, session.phase_fine, session.t_fine)) for k in lifted]
-    flagged = []
+    flagged, t = [], res.body.t
     for r in res.reps:
-        span = (res.body.t[r.cycle.start], res.body.t[r.cycle.end])
-        mine = any(span[0] <= x <= span[1] for x in lift_t)
-        v = r.metrics["f_heel_lift_cm"]
-        if r.number in (1, len(res.reps)):                  # stepping in and out: not checked
+        (a, b), _ = heel_windows(r.cycle.start, r.cycle.mid, r.cycle.end)
+        mine = any(t[a] <= x <= t[b] for x in lift_t)
+        v = r.metrics["heel_lift_catch"]
+        if r.number in (1, len(res.reps)):                  # stepping in and out: not judged
             assert math.isnan(v), (r.number, v)
             continue
-        assert (v >= HEEL_LIFT_CM) == mine, (r.number, v, mine)
+        assert (v > LIFT_CM) == mine, (r.number, v, mine)
+        assert r.metrics["heel_lift_finish"] < 2.0, r.metrics["heel_lift_finish"]   # pixel noise
         if mine:
-            assert 5.0 < v < 7.0, v
+            # scaled by the force setup's height; smoothing takes ~8% off this 0.3 s bump
+            assert 5.2 < v < 6.3, v
             flagged.append(r.number)
     assert len(flagged) == len(lifted)
+    assert not any(f.rule_id == "heels_up_finish" for r in res.reps for f in r.faults)
     note = next(c for c in fa.checks if c.startswith("Heels came off the floor"))
     assert f"on 3 of the {len(res.reps) - 2} strokes checked" in note
-    assert fa.summary["heel_lift_strokes"] == 3
+    assert note in res.warnings and fa.summary["heel_lift_strokes"] == 3
     with open(outcome.files["forces"]) as fh:
         f = json.load(fh)
     lift = np.array([np.nan if v is None else v for v in f["heel_lift_cm"]], float)
-    assert f["feet_measured"] and 5 < np.nanmax(lift) < 7
+    assert f["feet_measured"] and 5.2 < np.nanmax(lift) < 6.3
     with open(outcome.files["reps"]) as fh:
-        assert "f_heel_lift_cm" in next(csv.reader(fh))
+        head = next(csv.reader(fh))
+        assert "heel_lift_catch" in head and "f_heel_lift_cm" not in head
 
 
 def test_without_the_setup_there_is_no_force_model():
