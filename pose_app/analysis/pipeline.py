@@ -196,7 +196,7 @@ def analyze(ex: Extraction, station: Station, min_score: float = 0.5,
                                   force_setup, min_score, prior, window, ex.camera)
             sync = force.sync
         else:
-            sync = sync_by_hands(body, cycles, pm5, prior, window)
+            sync = sync_by_hands(body, cycles, pm5, prior, window, station.driver)
         if from_pm5 and telemetry_offset is None and sync.ok:
             alignment = _stroke_alignment(sync, alignment)
     if telemetry is not None:

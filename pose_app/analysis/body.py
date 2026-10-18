@@ -106,6 +106,12 @@ def build_body_series(t: np.ndarray, frame_index: np.ndarray, kp: np.ndarray,
     m["hip_h"] = (n["ankle"][:, 1] - n["hip"][:, 1]) / L
     m["shank"] = np.degrees(np.arctan2((n["knee"][:, 0] - n["ankle"][:, 0]) * series.facing,
                                        n["ankle"][:, 1] - n["knee"][:, 1]))  # 0 = vertical shin
+    # Horizontal positions ahead of the ankle, in the facing direction (torso lengths): on
+    # the rower the feet sit still on the footplate, so the ankle is the machine's frame and
+    # these are the seat (hip), the shoulders and the handle (wrist). Read in one frame, a
+    # drifting camera cancels out.
+    for j in ("hip", "knee", "shoulder", "wrist"):
+        m[f"x_{j}"] = (n[j][:, 0] - n["ankle"][:, 0]) * series.facing / L
     ls, rs = series.point("left_shoulder"), series.point("right_shoulder")
     m["shoulder_tilt"] = np.degrees(np.arctan2(rs[:, 1] - ls[:, 1], np.abs(rs[:, 0] - ls[:, 0])))
     # cm, NaN without a body-with-feet model (feet.py)
