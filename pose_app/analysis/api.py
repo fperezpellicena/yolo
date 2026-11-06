@@ -51,6 +51,8 @@ ERROR_CODES = {
     "unsupported_station": "the station is not analysed yet",
     "invalid_job": "the request itself is wrong (options, folder or file names): "
                    "the caller's fault, not the athlete's",
+    "missing_video": "the video is no longer kept and the run needs it: there is no pose "
+                     "pass of it to reuse, or it lacks what the run needs",
 }
 
 
@@ -99,7 +101,7 @@ class AnalysisOptions:
 @dataclass
 class AnalysisOutcome:
     result: AnalysisResult
-    video: VideoInfo
+    video: Optional[VideoInfo]      # None for a run without the video
     files: Dict[str, str]           # "report", "summary", "reps", "video", "pose_cache", "forces" -> path
     warnings: List[str]             # option problems first, then the analysis' own
 
@@ -112,13 +114,18 @@ def default_thresholds(station: str) -> Dict[str, float]:
                                         *force)}
 
 
-def run_analysis(video_path: str, out_dir: str, opts: Optional[AnalysisOptions] = None,
+def run_analysis(video_path: Optional[str], out_dir: str, opts: Optional[AnalysisOptions] = None,
                  estimator=None, on_progress: Optional[ProgressFn] = None) -> AnalysisOutcome:
     """Analyse `video_path` and write report, CSV, JSON, video and pose cache to `out_dir`.
 
     `estimator` is a loaded estimator (anything with `.detect(frame)`) so a
     long-lived caller loads the model once; when omitted one is built from
     `opts`. Its settings must then match `opts.model` and `opts.kpt_conf`.
+
+    Without `video_path`, as once a caller no longer keeps the video, the run works
+    from the pose pass in `opts.pose_cache` alone: it must have the same clip and,
+    for the force analysis, the camera's motion. Such a run writes neither the
+    annotated video nor the HTML report, which need the frames.
     """
     opts = opts or AnalysisOptions()
     station = _station(opts.station)
@@ -133,23 +140,35 @@ def run_analysis(video_path: str, out_dir: str, opts: Optional[AnalysisOptions] 
         if not station.force:
             raise AnalysisError("invalid_job", f"Force analysis is not available for {station.name}.")
     pm5 = _load_pm5(opts.pm5) if opts.pm5 else None
-    try:
-        reader = VideoReader(video_path, opts.start, opts.end, opts.rotate)
-    except RuntimeError as exc:
-        raise AnalysisError("unreadable_video", str(exc)) from exc
-    except ValueError as exc:                       # a rotation it does not support
-        raise AnalysisError("invalid_job", str(exc)) from exc
-    info = reader.info
+    if video_path is None and (opts.video or opts.report):
+        raise AnalysisError("invalid_job", "The annotated video and the HTML report need the video: "
+                                           "turn them off for a run without it.")
+    reader, info = None, None
+    if video_path is not None:
+        try:
+            reader = VideoReader(video_path, opts.start, opts.end, opts.rotate)
+        except RuntimeError as exc:
+            raise AnalysisError("unreadable_video", str(exc)) from exc
+        except ValueError as exc:                   # a rotation it does not support
+            raise AnalysisError("invalid_job", str(exc)) from exc
+        info = reader.info
     os.makedirs(out_dir, exist_ok=True)
     files = {name: os.path.join(out_dir, OUTPUT_FILES[name])
              for name in ("pose_cache", "summary")}
-    log.info(f"{info.path}: {info.width}x{info.height}, {info.fps:.1f} fps, "
-             f"{info.duration:.1f} s  ->  {out_dir}")
 
-    ex = _extraction(reader, opts, files["pose_cache"], estimator, on_progress,
-                     pose_params(video_path, opts))
+    if reader is None:
+        log.info(f"No video: reusing the previous run's pose pass  ->  {out_dir}")
+        ex = _previous_extraction(opts, files["pose_cache"])
+    else:
+        log.info(f"{info.path}: {info.width}x{info.height}, {info.fps:.1f} fps, "
+                 f"{info.duration:.1f} s  ->  {out_dir}")
+        ex = _extraction(reader, opts, files["pose_cache"], estimator, on_progress,
+                         pose_params(video_path, opts))
     if ex.camera is None and opts.force is not None:
         # a pose pass from before the camera was measured: the force model needs it
+        if reader is None:
+            raise AnalysisError("missing_video", "The force analysis needs the camera's motion, which "
+                                                 "the pose pass lacks and the video is gone.")
         log.info("Measuring the camera's motion (pose cache from an earlier version).")
         add_camera(ex, reader)
         ex.save(files["pose_cache"])
@@ -222,15 +241,41 @@ def _load_pm5(path: str):
 def pose_params(video_path: str, opts: AnalysisOptions) -> Dict[str, Any]:
     """What a pose pass of `video_path` with `opts` depends on, as JSON-ready values."""
     params: Dict[str, Any] = {"video": os.path.basename(video_path),
-                              "video_bytes": os.path.getsize(video_path)}
-    for key in CLIP_KEYS + MODEL_KEYS:
-        value = getattr(opts, key)
-        params[key] = [float(v) for v in value] if isinstance(value, (tuple, list)) else value
+                              "video_bytes": os.path.getsize(video_path),
+                              **_option_params(opts, CLIP_KEYS + MODEL_KEYS)}
     if is_rtm_model(opts.model):
         # RTMPose caches keep the feet since the Halpe-26 layout; earlier ones (17 points)
         # lack this key, so they are not reused as if they had them
         params["keypoints"] = "halpe26"
     return params
+
+
+def _option_params(opts: AnalysisOptions, keys) -> Dict[str, Any]:
+    """The options among `keys`, as JSON-ready values (as pose caches keep them)."""
+    params: Dict[str, Any] = {}
+    for key in keys:
+        value = getattr(opts, key)
+        params[key] = [float(v) for v in value] if isinstance(value, (tuple, list)) else value
+    return params
+
+
+def _previous_extraction(opts: AnalysisOptions, cache: str) -> Extraction:
+    """The previous run's pose pass, for a run without the video: whatever model made it,
+    as there are no frames to run another, but of the same clip and athlete."""
+    if not opts.pose_cache or not os.path.exists(opts.pose_cache):
+        raise AnalysisError("missing_video", "The video is gone and there is no pose pass to reuse.")
+    try:
+        ex = Extraction.load(opts.pose_cache)
+    except ValueError as exc:                       # a cache from another version
+        raise AnalysisError("missing_video", f"The video is gone and its pose pass cannot be "
+                                             f"reused: {exc}") from exc
+    changed = _changed(ex.params, _option_params(opts, CLIP_KEYS), CLIP_KEYS) if ex.params else []
+    if changed:
+        raise AnalysisError("missing_video", "The video is gone and its pose pass was made with "
+                                             "another " + ", ".join(changed) + ".")
+    if os.path.abspath(opts.pose_cache) != os.path.abspath(cache):
+        ex.save(cache)
+    return ex
 
 
 def _extraction(reader: VideoReader, opts: AnalysisOptions, cache: str, estimator,

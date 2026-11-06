@@ -158,7 +158,11 @@ class Worker:
         out_dir = _resolve(root, job.output_dir, "Output folder")
         if not os.path.isdir(out_dir):
             raise AnalysisError("invalid_job", f"Output folder '{job.output_dir}' not found.")
-        video = _input(root, job.video)
+        video = _input(root, job.video) if job.video else None
+        if video is None:
+            # The web app removed the video: the run works from the last run's pose pass and
+            # leaves its annotated video as it is, as there are no frames to draw a new one on
+            opts.video = False
         if job.telemetry:
             opts.telemetry = _input(root, job.telemetry)
         if job.pm5:
@@ -202,9 +206,10 @@ class Worker:
         return {"reps": len(reps),
                 "clean_reps": sum(1 for r in reps if not r.faults),
                 "analysed_s": round(float(t[-1] - t[0]), 1),      # the clip, not the file
-                # the whole uploaded file, its size as displayed (rotation applied)
-                "video": {"duration_s": round(video.duration, 3),
-                          "width": video.width, "height": video.height},
+                # the whole uploaded file, its size as displayed (rotation applied); None on
+                # a run without it, whose analysis keeps what the first run measured
+                "video": None if video is None else {"duration_s": round(video.duration, 3),
+                                                     "width": video.width, "height": video.height},
                 "warnings": outcome.warnings}
 
 

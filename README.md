@@ -308,6 +308,14 @@ analysis' setup, reuses the last run's pose_cache.npz if the video, clip,
 rotation, athlete choice and the worker's model settings are the same, so it
 skips straight to the analysis and the annotated video.
 
+The web app only keeps uploaded videos for a while (the annotated video, the
+pose pass and the results stay). A job on an analysis whose video is gone has
+no `inputs.video`: it runs on the last run's pose_cache.npz, whatever model
+made it, writes no annotated video and leaves the one there as it is, and
+sends `result.video` as null, as the analysis keeps what the first run
+measured. Without a usable pose pass (none, another clip, or one without the
+camera's motion that the force analysis needs) it fails with `missing_video`.
+
     pip install -r requirements-worker.txt
     export WORKER_API_URL=http://web:8081      # the web app's internal API port
     export WORKER_API_TOKEN=...                # the web app's WORKER_API_TOKEN

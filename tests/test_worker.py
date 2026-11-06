@@ -98,7 +98,7 @@ class FakeApi:
         job_id = queued[0]
         job = self.jobs[job_id]
         job.update(status="RUNNING", worker=worker, attempts=job["attempts"] + 1)
-        inputs = {"video": job["video"]}
+        inputs = {"video": job["video"]} if job["video"] else {}
         if job["telemetry"]:
             inputs["telemetry"] = job["telemetry"]
         if job["pm5"]:
@@ -278,6 +278,55 @@ def test_force_job_reads_the_pm5_log_and_reports_the_force():
     assert api.jobs[plain]["status"] == "SUCCEEDED"
     assert "force_frames" not in api.jobs[plain]["outcome"]["outputs"]
     assert "forces.json" not in _listing(cfg, folder)
+
+
+def test_a_job_without_the_video_runs_on_the_last_pose_pass():
+    # The web app removes uploaded videos after a while; the athlete may still add the force
+    # analysis, which then works from the pose pass of the first run
+    import synthetic_force as sf
+    cfg, api, folder = _setup()
+    session = sf.Session(n_strokes=12)
+    base = os.path.join(cfg.media_root, folder)
+    session.write_video(os.path.join(base, "ski.mp4"))
+    session.write_pm5_log(os.path.join(base, "ski.pm5.jsonl"))
+    first = api.queue(f"{folder}/ski.mp4", folder, pm5=f"{folder}/ski.pm5.jsonl",
+                      options={"video": False})
+    assert _run_once(cfg, session.estimator())
+    assert api.jobs[first]["status"] == "SUCCEEDED", api.jobs[first].get("outcome")
+    with open(os.path.join(base, "annotated.mp4"), "wb") as fh:
+        fh.write(b"the first run's")
+    os.remove(os.path.join(base, "ski.mp4"))
+
+    job = api.queue(None, folder, pm5=f"{folder}/ski.pm5.jsonl",
+                    options={"force": session.setup().to_dict()})
+    assert _run_once(cfg, _NoDetector())
+    state = api.jobs[job]
+    assert state["status"] == "SUCCEEDED", state.get("outcome")
+    outcome = state["outcome"]
+    assert outcome["report"]["force"]["summary"]["strokes_with_curve"] >= 8
+    assert outcome["outputs"] == {"pose_cache": f"{folder}/pose_cache.npz",
+                                  "force_frames": f"{folder}/forces.json"}
+    # The analysis keeps what the first run measured on the video, and its annotated video
+    assert outcome["result"]["video"] is None
+    with open(os.path.join(base, "annotated.mp4"), "rb") as fh:
+        assert fh.read() == b"the first run's"
+    assert not any(body.get("stage") == "pose" for action, j, body in api.calls
+                   if action == "progress" and j == job)
+
+    # Another clip would need the frames
+    clip = api.queue(None, folder, options={"start": 2.0})
+    os.remove(os.path.join(base, "forces.json"))
+    assert _run_once(cfg, _NoDetector())
+    assert api.jobs[clip]["outcome"]["code"] == "missing_video", api.jobs[clip]["outcome"]
+    # And without the pose pass there is nothing to run on
+    os.remove(os.path.join(base, "pose_cache.npz"))
+    gone = api.queue(None, folder, pm5=f"{folder}/ski.pm5.jsonl",
+                     options={"force": session.setup().to_dict()})
+    assert _run_once(cfg, _NoDetector())
+    state = api.jobs[gone]
+    assert state["status"] == "FAILED" and state["attempts"] == 1, state
+    assert state["outcome"]["code"] == "missing_video" and not state["outcome"]["retryable"]
+    assert _listing(cfg, folder) == ["annotated.mp4", "clip.mp4", "ski.pm5.jsonl"]
 
 
 class _BrokenEstimator(FakeEstimator):

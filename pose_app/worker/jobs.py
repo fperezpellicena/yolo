@@ -13,7 +13,10 @@ be a second implementation of the same interface.
     POST {api}/internal/jobs/{id}/fail        {worker, code, message, retryable} -> 204 | 409
 
 A claimed job's `inputs` hold `video` and optionally `telemetry` (machine data
-CSV) and `pm5` (PM5 Bluetooth log, for the force analysis).
+CSV) and `pm5` (PM5 Bluetooth log, for the force analysis). The web app only
+keeps uploaded videos for a while: a job on an analysis whose video it removed,
+as when the athlete adds the force analysis later, has no `video`, and runs on
+the pose pass of the run before.
 
 409 means the job is no longer ours (cancelled, or given to another worker
 after we went silent): the worker drops it. Progress doubles as the
@@ -39,7 +42,8 @@ log = logging.getLogger(__name__)
 class Job:
     id: int
     station: str
-    video: str                      # key of the uploaded video: a path relative to the media root
+    video: Optional[str]            # key of the uploaded video: a path relative to the media root;
+                                    # None once the web app removed it
     telemetry: Optional[str]        # key of the machine data CSV, if any
     output_dir: str                 # key of the folder to write the outputs in
     options: Dict[str, Any]
@@ -103,7 +107,7 @@ class HttpJobClient:
         if status == 204:
             return None
         inputs = body["inputs"]
-        return Job(id=body["id"], station=body["station"], video=inputs["video"],
+        return Job(id=body["id"], station=body["station"], video=inputs.get("video"),
                    telemetry=inputs.get("telemetry"), output_dir=body["output_dir"],
                    options=body.get("options") or {}, attempt=body["attempt"],
                    pm5=inputs.get("pm5"))
