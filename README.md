@@ -11,6 +11,7 @@ Four tools share one package, `pose_app`, each in its own subpackage:
 
     python hyrox_analyze.py clip.mp4 --station skierg
     python hyrox_analyze.py clip.mp4 --station skierg --start 12 --end 250
+    python hyrox_analyze.py clip.mp4 --station rowerg
     python hyrox_analyze.py --list-stations
 
 Writes `<clip>_analysis/` containing:
@@ -121,6 +122,66 @@ height when given, else 1.75 m: within about 10%). Per stroke:
   clips where nobody lifted their heels mid-piece; real lifts there (stepping
   on and off) read 6-14 cm. Hence the 5 cm line. No clip with real heel
   raises during the strokes has been checked yet.
+
+### RowErg (Concept2 rower)
+
+    python hyrox_analyze.py clip.mp4 --station rowerg
+    python hyrox_analyze.py clip.mp4 --station rowerg --telemetry row.csv     # Track My Indoor Workout
+    python hyrox_analyze.py clip.mp4 --station rowerg --pm5 row.pm5.jsonl     # PM5 log as machine data
+
+Technique only for now: the force analysis (`--force-setup`) is SkiErg-only and
+the rower's is planned. The research behind the metrics and rules, with sources,
+is the project note `claude/rowing-technique-research.md`.
+
+Film side-on and square to the rower at about seat height, the whole machine in
+frame (flywheel and the athlete at both ends of the slide), 60 fps if possible,
+and sit still at the catch for a moment before the first stroke.
+
+How it reads a stroke (`stations/rowerg.py`). The feet sit still on the
+footplate, so positions are read ahead of the near ankle, in the direction the
+athlete faces (towards the flywheel), in torso lengths (`x_hip`, `x_knee`,
+`x_shoulder`, `x_wrist` in `body.py`). One stroke is the handle (wrist) furthest
+forward (catch) -> nearest (finish) -> furthest again. A pause at the catch (the
+handle moving less than 1.5% of the stroke length in 0.3 s) is cut off the
+stroke, so the first stroke from rest keeps its true drive time. Kleshnev's
+decomposition splits the handle's travel into legs (hip on the ankle), trunk
+(shoulder on the hip) and arms (wrist on the shoulder).
+
+| metric | |
+|---|---|
+| `rate_spm`, `drive_s`, `recovery_s` | |
+| `rhythm_pct`, `rhythm_excess` | drive time / stroke time (%), and its excess over the usual for the rate on a Concept2 (41.7% at 20.7 spm, +0.9 per spm; Kleshnev 2005), in points |
+| `stroke_len` | handle travel in the drive (torso lengths) |
+| `legs_pct`, `trunk_pct`, `arms_pct` | each segment's share of it |
+| `knee_catch`, `shin_catch`, `trunk_catch`, `elbow_catch` | catch posture: knee angle, shin past vertical (+ = knee ahead of the ankle), forward lean from vertical, elbow |
+| `handle_catch_h` | handle above the knee at the catch (torso lengths) |
+| `knee_finish`, `trunk_finish`, `handle_finish_pos` | finish: knee, layback behind vertical, where the handle comes in along the torso (0 hip, 1 shoulder) |
+| `slide_lead` | seat travel / handle travel over the first 20% of the handle's travel (Kleshnev's Rowing Style Factor; 0.90-0.95 efficient, over 1 the seat runs ahead of the handle) |
+| `trunk_open_at_90` | how far the trunk has opened (°) when the knees pass 90° in the drive (NaN when the catch knee is over 90°) |
+| `legs_at_arm_bend` | % of the legs' drive done when the elbows have done a quarter of their bend |
+| `seq_legs_ms`, `seq_trunk_ms`, `seq_arms_ms`, `v_*_max` | when each segment's speed peaks in the drive (ms after the catch), and the peaks (torso lengths/s; also `v_handle_max`) |
+| `knees_after_hands_ms` | recovery: the knees start bending (15% of their bend) this long after the hands pass them; negative = knees first |
+| `trunk_dive` | recovery: forward lean still added after halfway up the slide (°) |
+| `slide_speed_ratio` | highest seat speed up the slide / down it in the drive |
+| `heel_lift_catch` | as on the SkiErg (body-with-feet models); reported, not judged: heels rising at the catch is normal on the rower |
+
+Rules (`--print-thresholds`): major `arms_early` (`legs_at_arm_bend` < 50%),
+`body_opens_early` (`trunk_open_at_90` > 15°), `shooting_slide`
+(`slide_lead` > 1.2); minor `knees_early` (< -100 ms), `diving_catch` (> 12°),
+`over_compression` (shins > 20° past vertical), `short_catch` (knee > 85°),
+`upright_catch` / `over_reach` (lean < 5° / > 45°), `over_layback` /
+`no_layback` (> 45° / < 0°), `legs_not_down` (knee < 150°), `bent_arm_catch`
+(< 145°), `handle_drop_catch` (< -0.35), `high_finish` / `low_finish`
+(> 0.9 / < 0.15), `rushed_recovery` (`rhythm_excess` > 12 points),
+`rushing_slide` (> 1.1). Fatigue checks: rate (-10%), stroke length (-8%), lean
+at the catch (+6°, the closest a side view gets to the back rounding as it
+tires), `slide_lead` (+0.15), layback (+6°).
+
+The thresholds start looser than the world-class ranges they come from (World
+Championship medallists: knee 47 ± 9° and lean 24.5 ± 4.5° at the catch, layback
+26 ± 4° at the finish) and are checked only on a synthetic rower so far: tune them
+on real clips. One side-on camera cannot see the lower back's own flexion, the
+shoulders hunching, the wrists or twisting; the trunk is the hip-shoulder line.
 
 
 ### Force analysis (SkiErg with a Concept2 PM5)

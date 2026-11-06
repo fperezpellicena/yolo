@@ -186,9 +186,11 @@ def pm5_drives(pm5: Pm5Session) -> Tuple[np.ndarray, np.ndarray]:
 
 
 def sync_by_hands(body: BodySeries, cycles: Sequence[Cycle], pm5: Pm5Session,
-                  prior: Optional[float], prior_window: float) -> StrokeSync:
-    """Stroke-by-stroke sync without calibration (for the machine data alone)."""
-    windows = hand_windows(body.t, body.metrics["wrist_h"], cycles)
+                  prior: Optional[float], prior_window: float,
+                  driver: str = "wrist_h") -> StrokeSync:
+    """Stroke-by-stroke sync without calibration (for the machine data alone). `driver` is
+    the station's hand signal, highest at the drive's start and lowest at its end."""
+    windows = hand_windows(body.t, body.metrics[driver], cycles)
     sync = match_strokes(windows, *pm5_drives(pm5), prior, prior_window)
     sync.events = "hands"
     return sync
